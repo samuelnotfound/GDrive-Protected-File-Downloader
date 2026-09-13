@@ -5,7 +5,7 @@
   const PREFIX = "blob:https://drive.google.com/";
   const MIN_W = 500;
   const MIN_H = 300;
-  const DEFAULT_DELAY = 10;
+  const DEFAULT_DELAY = 70;
 
   let running = false;
   let completed = false;
@@ -14,7 +14,9 @@
   let currentTotalHint = null;
   let activePort = null;
   let scrollDelay = DEFAULT_DELAY;
+  const enableOCR = true;
   const pages = new Map();
+  const capturedPages = new Map();
   let orderCounter = 0;
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -128,7 +130,13 @@
         showInPageOverlay(true);
         const root = document.getElementById("psd-inpage-overlay");
         root?.classList.remove("quiet", "idle", "completed", "cancelled");
-        if (!running) start();
+        if (root) {
+          const title = root.querySelector("#psd-inpage-title");
+          const detail = root.querySelector("#psd-inpage-detail");
+          if (title) title.textContent = "Preparing download";
+          if (detail) detail.textContent = "";
+        }
+        start({enableOCR: true});
       };
 
       // Normalize cloned styles/classes so the action is visibly enabled even
@@ -278,16 +286,64 @@
     });
   }
 
-  function scan() {
+  function scan(pageNumber = null) {
     let added = 0;
     for (const img of allImages()) {
       const src = img.currentSrc || img.src;
       if (!pages.has(src)) {
-        pages.set(src, {src, w: img.naturalWidth, h: img.naturalHeight, order: orderCounter++});
+        pages.set(src, {src, w: img.naturalWidth, h: img.naturalHeight, order: orderCounter++, pageNumber});
         added++;
+      } else if (pageNumber != null) {
+        const existing = pages.get(src);
+        if (existing && existing.pageNumber == null) existing.pageNumber = pageNumber;
       }
     }
     return added;
+  }
+
+  function getCurrentPageImage() {
+    const vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 1;
+    const cx = vw / 2;
+    const cy = vh / 2;
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const img of allImages()) {
+      const r = img.getBoundingClientRect();
+      const visibleW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+      const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+      if (visibleW < 50 || visibleH < 50) continue;
+      const area = visibleW * visibleH;
+      const fullArea = Math.max(1, r.width * r.height);
+      const mx = r.left + r.width / 2;
+      const my = r.top + r.height / 2;
+      const distance = Math.hypot(mx - cx, my - cy);
+      const score = area * 2 + fullArea - distance * 500;
+      if (score > bestScore) {
+        bestScore = score;
+        best = img;
+      }
+    }
+    return best;
+  }
+
+  async function waitForCurrentPageImage(pageNumber, timeout = 1200) {
+    const start = performance.now();
+    let last = null;
+    while (performance.now() - start < timeout) {
+      const info = getPageInput();
+      if (info && info.current === pageNumber) {
+        const img = getCurrentPageImage();
+        if (img) {
+          last = img;
+          const src = img.currentSrc || img.src || "";
+          if (src && img.complete && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H) return img;
+        }
+      }
+      await sleep(20);
+    }
+    return last;
   }
 
   function getPageCountHint() {
@@ -387,13 +443,13 @@
     (document.body || document.documentElement).appendChild(root);
     root.style.display = "none";
 
+
     root.querySelector("#psd-inpage-toggle").onclick = () => {
-      if (running) {
-        stopRequested = true;
-        root.classList.add("cancelled");
-        root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
-        setTimeout(() => showInPageOverlay(false), 800);
-      }
+      if (!running) return;
+      stopRequested = true;
+      root.classList.add("cancelled");
+      root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
+      setTimeout(() => showInPageOverlay(false), 800);
     };
     root.querySelector("#psd-inpage-close").onclick = () => showInPageOverlay(false);
   }
@@ -408,7 +464,6 @@
       button.disabled = false;
       button.textContent = "Cancel";
     } else {
-      root.classList.add("idle");
       button.style.display = "none";
       button.disabled = true;
     }
@@ -435,9 +490,11 @@
     if (detailEl && !root.classList.contains("cancelled")) {
       const text = String(detail || "");
       if (/^Processing page\b/i.test(text)) detailEl.textContent = text;
-      else if (/^Preparing page\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing page/i, "Preloading page");
-      else if (/^Preparing pages\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing pages/i, "Preloading pages");
-      else if (/^Preparing your PDF/i.test(text)) detailEl.textContent = "Preloading PDF…";
+      else if (/^Loading page\b/i.test(text)) detailEl.textContent = text;
+      else if (/^Loading pages\b/i.test(text)) detailEl.textContent = text;
+      else if (/^Preparing page\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing page/i, "Loading page");
+      else if (/^Preparing pages\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing pages/i, "Loading pages");
+      else if (/^Preparing your PDF/i.test(text)) detailEl.textContent = "Preparing PDF…";
       else detailEl.textContent = text;
     }
     if (typeof percent === "number") {
@@ -538,6 +595,7 @@
     stopRequested = false;
     ready = false;
     pages.clear();
+    capturedPages.clear();
     currentTotalHint = null;
     resetProgressUI();
     const overlay = document.getElementById("psd-inpage-overlay");
@@ -549,20 +607,45 @@
     const totalHint = pageInfo?.max || getPageCountHint();
     currentTotalHint = totalHint;
 
-    ui("Preparing…", "Preparing your PDF…", 0, 0);
+    ui("Preparing…", "Loading pages…", 0, 0);
     log(`Detected page count: ${totalHint || "unknown"}`);
 
     if (pageInfo && totalHint) {
-      log("✓ Page-number control found. Loading pages individually…");
+      // Fast warm-up pass: visit every page first so Drive has a chance to
+      // populate/cache its lazy-loaded page images before we capture them.
+      // This pass deliberately does not scan or store images.
+      log("✓ Starting fast page warm-up…");
       for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
-        const beforeSources = new Set(pages.keys());
         const ok = await goToPage(pageNo);
         if (!ok) break;
-        await waitForPageImage(beforeSources, 700);
-        scan();
-        const percent = Math.floor(pageNo / totalHint * 50);
-        ui("Preparing…", `Preparing page ${pageNo} / ${totalHint}`, percent, pages.size);
-        if (pageNo === 1 || pageNo % 10 === 0 || pageNo === totalHint) log(`✓ Page ${pageNo}/${totalHint} — ${pages.size} page images captured`);
+        ui("Preparing…", `Loading page ${pageNo} / ${totalHint}`, Math.floor(pageNo / totalHint * 20), 0);
+        if (pageNo === 1 || pageNo % 25 === 0 || pageNo === totalHint) log(`✓ Warm-up ${pageNo}/${totalHint}`);
+        await sleep(70);
+      }
+
+      // Return to page 1 so capture order always starts at the beginning.
+      if (!stopRequested) await goToPage(1);
+
+      log("✓ Warm-up complete. Capturing pages…");
+      for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
+        const ok = await goToPage(pageNo);
+        if (!ok) break;
+
+        const img = await waitForCurrentPageImage(pageNo, 1200);
+        if (img) {
+          const src = img.currentSrc || img.src || "";
+          if (src) {
+            const page = {src, w: img.naturalWidth, h: img.naturalHeight, order: pageNo - 1, pageNumber: pageNo};
+            capturedPages.set(pageNo, page);
+            if (!pages.has(src)) pages.set(src, {...page, order: orderCounter++});
+          }
+        } else {
+          log(`⚠ Could not resolve the rendered image for page ${pageNo}`);
+        }
+
+        const percent = 20 + Math.floor(pageNo / totalHint * 30);
+        ui("Preparing…", `Capturing page ${pageNo} / ${totalHint}`, percent, capturedPages.size);
+        if (pageNo === 1 || pageNo % 10 === 0 || pageNo === totalHint) log(`✓ Page ${pageNo}/${totalHint} — ${capturedPages.size} pages captured`);
       }
     } else {
       log("Page-number control not found. Using automatic scrolling fallback…");
@@ -598,28 +681,38 @@
       return;
     }
 
-    if (pageInfo && totalHint && pages.size < totalHint) {
-      log(`⚠ ${totalHint - pages.size} pages not yet captured. Running a second pass…`);
-      for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
-        const beforeSources = new Set(pages.keys());
+    if (pageInfo && totalHint && capturedPages.size < totalHint) {
+      const missing = [];
+      for (let pageNo = 1; pageNo <= totalHint; pageNo++) {
+        if (!capturedPages.has(pageNo)) missing.push(pageNo);
+      }
+      log(`⚠ ${missing.length} pages not yet captured. Running recovery check…`);
+      for (let i = 0; i < missing.length && !stopRequested; i++) {
+        const pageNo = missing[i];
         await goToPage(pageNo);
-        await waitForPageImage(beforeSources, 700);
-        scan();
-        ui("Preparing…", `Preparing page ${pageNo} / ${totalHint}`, 25 + Math.floor(pageNo / totalHint * 25), pages.size);
+        const img = await waitForCurrentPageImage(pageNo, 1800);
+        if (img) {
+          const src = img.currentSrc || img.src || "";
+          if (src) {
+            const page = {src, w: img.naturalWidth, h: img.naturalHeight, order: pageNo - 1, pageNumber: pageNo};
+            capturedPages.set(pageNo, page);
+            if (!pages.has(src)) pages.set(src, {...page, order: orderCounter++});
+          }
+        }
+        ui("Preparing…", `Checking missing page ${pageNo} / ${totalHint}`, 50 + Math.floor((i + 1) / Math.max(1, missing.length) * 25), capturedPages.size);
       }
     }
 
-    const total = totalHint || pages.size;
-    ready = pages.size > 0 && (!totalHint || pages.size >= totalHint);
+    const total = totalHint || capturedPages.size || pages.size;
+    ready = capturedPages.size > 0 && (!totalHint || capturedPages.size >= totalHint);
     running = false;
     setButtons();
     ui(ready ? "Ready to process PDF" : "Some pages were not captured",
-       ready ? `${pages.size} / ${total} page images captured` : `${pages.size} / ${total || "?"} page images captured. Try Start again.`,
-       ready ? 100 : Math.min(99, Math.floor(pages.size / Math.max(1, total) * 100)), pages.size);
-    log(ready ? "✓ Preload complete — all pages captured." : "⚠ Preload ended before all pages were captured.");
+       ready ? `${capturedPages.size} / ${total} page images captured` : `${capturedPages.size} / ${total || "?"} page images captured. Try Start again.`,
+       ready ? 100 : Math.min(99, Math.floor(capturedPages.size / Math.max(1, total) * 100)), capturedPages.size);
+    log(ready ? "✓ Capture complete — all pages captured. Starting OCR/PDF processing…" : "⚠ Capture ended before all pages were captured.");
 
     if (ready && !stopRequested) {
-      running = false;
       await generatePDF();
     }
   }
@@ -629,6 +722,73 @@
     title = title.replace(/\s*-\s*Google Drive\s*$/i, "").trim();
     if (!/\.pdf$/i.test(title)) title += ".pdf";
     return title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
+  }
+
+  let ocrWorker = null;
+  let ocrRequestId = 0;
+  const ocrRequests = new Map();
+
+  function getOCRWorker() {
+    if (ocrWorker) return ocrWorker;
+
+    const workerURL = chrome.runtime.getURL("vendor/ocr-worker.js");
+    ocrWorker = new Worker(workerURL);
+
+    ocrWorker.onmessage = event => {
+      const message = event.data || {};
+
+      if (message.type === "progress") {
+        ocrProgress = Math.max(0, Math.min(1, Number(message.progress) || 0));
+        return;
+      }
+
+      if (message.type !== "result" && message.type !== "error") return;
+
+      const request = ocrRequests.get(message.id);
+      if (!request) return;
+      ocrRequests.delete(message.id);
+
+      if (message.type === "error") request.reject(new Error(message.message || "OCR failed."));
+      else request.resolve(message.words || []);
+    };
+
+    ocrWorker.onerror = event => {
+      const error = new Error(event.message || "Offline OCR worker failed.");
+      for (const request of ocrRequests.values()) request.reject(error);
+      ocrRequests.clear();
+      try { ocrWorker?.terminate(); } catch (_) {}
+      ocrWorker = null;
+    };
+
+    return ocrWorker;
+  }
+
+  async function shutdownOCRWorker() {
+    if (!ocrWorker) return;
+    for (const request of ocrRequests.values()) {
+      request.reject(new Error("OCR worker stopped."));
+    }
+    ocrRequests.clear();
+    try { ocrWorker.terminate(); } catch (_) {}
+    ocrWorker = null;
+  }
+
+  let ocrProgress = 0;
+
+  async function recognizePage(imageBytes) {
+    const worker = getOCRWorker();
+    ocrProgress = 0;
+
+    const id = ++ocrRequestId;
+    return new Promise((resolve, reject) => {
+      ocrRequests.set(id, {resolve, reject});
+      try {
+        worker.postMessage({type: "recognize", id, image: imageBytes}, [imageBytes.buffer]);
+      } catch (error) {
+        ocrRequests.delete(id);
+        reject(error);
+      }
+    });
   }
 
   async function imageToJPEG(page) {
@@ -645,7 +805,7 @@
     const ctx = canvas.getContext("2d", {alpha: false});
     ctx.drawImage(img, 0, 0, page.w, page.h);
     const dataURL = canvas.toDataURL("image/jpeg", 0.92);
-    return {dataURL, width: page.w, height: page.h};
+    return {dataURL, width: page.w, height: page.h, canvas};
   }
 
   function dataURLBytes(dataURL) {
@@ -654,6 +814,10 @@
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
+  }
+
+  function pdfEscapeText(text) {
+    return String(text).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)").replace(/[\r\n]+/g, " ");
   }
 
   function makePDFWriter(total) {
@@ -666,7 +830,8 @@
     const pageObj = i => 3 + i * 3;
     const imageObj = i => 4 + i * 3;
     const contentObj = i => 5 + i * 3;
-    const maxObj = 2 + total * 3;
+    const fontObj = 3 + total * 3;
+    const maxObj = fontObj;
 
     pushStr("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
     const xref = new Array(maxObj + 1).fill(0);
@@ -680,16 +845,30 @@
       addPage: (i, im) => {
         const w = im.width, h = im.height;
         beginObj(pageObj(i));
-        pushStr(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im${i + 1} ${imageObj(i)} 0 R >> >> /Contents ${contentObj(i)} 0 R >>`);
+        pushStr(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im${i + 1} ${imageObj(i)} 0 R >> /Font << /F1 ${fontObj} 0 R >> >> /Contents ${contentObj(i)} 0 R >>`);
         endObj();
         const bytes = im.bytes;
         beginObj(imageObj(i));
         pushStr(`<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`);
         pushBytes(bytes); pushStr("\nendstream"); endObj();
-        const content = `q\n${w} 0 0 ${h} 0 0 cm\n/Im${i + 1} Do\nQ\n`;
-        beginObj(contentObj(i)); pushStr(`<< /Length ${content.length} >>\nstream\n${content}endstream`); endObj();
+
+        let content = `q\n${w} 0 0 ${h} 0 0 cm\n/Im${i + 1} Do\nQ\n`;
+        if (Array.isArray(im.words) && im.words.length) {
+          content += "BT\n/F1 10 Tf\n3 Tr\n";
+          for (const word of im.words) {
+            const height = Math.max(4, word.y1 - word.y0);
+            const size = Math.max(4, Math.min(72, height * 0.9));
+            const x = word.x0;
+            const y = h - word.y1 + Math.max(0, (word.y1 - word.y0) * 0.12);
+            content += `1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm\n/F1 ${size.toFixed(2)} Tf\n(${pdfEscapeText(word.text)}) Tj\n`;
+          }
+          content += "0 Tr\nET\n";
+        }
+        const contentBytes = enc.encode(content);
+        beginObj(contentObj(i)); pushStr(`<< /Length ${contentBytes.length} >>\nstream\n`); pushBytes(contentBytes); pushStr("endstream"); endObj();
       },
       finish: () => {
+        beginObj(fontObj); pushStr(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`); endObj();
         const xrefPos = pos;
         pushStr(`xref\n0 ${maxObj + 1}\n0000000000 65535 f \n`);
         for (let n = 1; n <= maxObj; n++) pushStr(String(xref[n]).padStart(10, "0") + " 00000 n \n");
@@ -700,7 +879,7 @@
   }
 
   async function generatePDF() {
-    if (running || !pages.size) return;
+    if (running || (!capturedPages.size && !pages.size)) return;
     running = true;
     stopRequested = false;
     const overlay = document.getElementById("psd-inpage-overlay");
@@ -710,7 +889,9 @@
     }
     setButtons();
 
-    const ordered = [...pages.values()].sort((a, b) => a.order - b.order);
+    const ordered = capturedPages.size
+      ? [...capturedPages.values()].sort((a, b) => a.pageNumber - b.pageNumber)
+      : [...pages.values()].sort((a, b) => a.order - b.order);
     const total = ordered.length;
     const writer = makePDFWriter(total);
 
@@ -723,7 +904,16 @@
       try {
         ui("Preparing…", `Processing page ${i + 1} / ${total}`, 50 + Math.floor(i / total * 48), i);
         const jpeg = await imageToJPEG(ordered[i]);
-        writer.addPage(i, {width: jpeg.width, height: jpeg.height, bytes: dataURLBytes(jpeg.dataURL)});
+        let words = [];
+        if (enableOCR) {
+          ui("Preparing…", `OCR page ${i + 1} / ${total}`, 50 + Math.floor((i + 0.35) / total * 48), i);
+          try {
+            words = await recognizePage(dataURLBytes(jpeg.dataURL));
+          } catch (ocrError) {
+            log(`⚠ OCR unavailable (${ocrError.message}). Continuing without OCR.`);
+          }
+        }
+        writer.addPage(i, {width: jpeg.width, height: jpeg.height, bytes: dataURLBytes(jpeg.dataURL), words});
         converted++;
         if ((i + 1) % 5 === 0 || i === ordered.length - 1) log(`✓ Processed ${i + 1}/${total}`);
         await sleep(0);
@@ -742,6 +932,7 @@
           root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
           setTimeout(() => showInPageOverlay(false), 800);
         }
+        await shutdownOCRWorker();
         log("PDF generation stopped.");
       } else {
         ui("PDF incomplete", `${converted} of ${total} pages were converted. No download was made.`, 0, converted);
@@ -751,6 +942,7 @@
 
     ui("Preparing…", "Finalizing the PDF file", 99, converted);
     await sleep(50);
+    await shutdownOCRWorker();
     const blob = writer.finish();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -765,6 +957,7 @@
     completed = false;
     ready = false;
     pages.clear();
+    capturedPages.clear();
     orderCounter = 0;
     currentTotalHint = null;
     setButtons();
@@ -780,12 +973,13 @@
     log(`✓ Downloaded ${safeFilename()}`);
   }
 
-  async function start() {
+  async function start(options = {}) {
     if (running) return;
     completed = false;
     resetProgressUI();
     await preload();
   }
+
 
   function handleCommand(msg) {
     if (msg.type === "init") {

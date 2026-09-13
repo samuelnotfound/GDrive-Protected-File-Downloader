@@ -29,6 +29,7 @@ function handle(m) {
   if (m.type === 'state') { completed = !!m.completed; renderState(!!m.running); }
 }
 
+
 async function connect() {
   try {
     port = chrome.tabs.connect(tabId, {name: 'pdf-downloader'});
@@ -79,7 +80,8 @@ async function init() {
 $('toggle').onclick = () => {
   if (completed && !currentRunning) { window.close(); return; }
   if (!port) return;
-  port.postMessage({type: currentRunning ? 'stop' : 'start'});
+  if (currentRunning) port.postMessage({type: 'stop'});
+  else port.postMessage({type: 'start'});
 };
 
 init();

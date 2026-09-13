@@ -1,26 +1,39 @@
-# View-Only PDF Downloader Chrome Extension
+# Google Drive View-Only PDF Downloader
 
-A Google Chrome extension for downloading view-only PDF files from Google Drive.
+A Chrome extension designed to bypass Google Drive's download restrictions on view-only PDF files.
 
-It captures the PDF pages as images and combines them into one PDF file.
+Unlike a standard file download, this tool acts as a workaround. It captures the document's pages as they are rendered in the Google Drive viewer and stitches them together into a new PDF file. It then runs Optical Character Recognition (OCR) on each page, making the final downloaded PDF fully text-searchable.
 
-## Instructions
+## Installation & Usage
 
-1. Download and extract the ZIP.
-2. Go to `chrome://extensions/`
-3. Turn on **Developer mode**.
-4. Click **Load unpacked**.
-5. Select the extracted folder.
-6. Open a view-only PDF in Google Drive.
-7. Open **File** → **Download View-Only PDF**.
+1. Download and extract the extension's ZIP file.
 
-The extension will capture the pages and download them as a PDF.
+2. Open Chrome and navigate to `chrome://extensions/`.
 
-## Credit
+3. Toggle on **Developer mode** in the top right corner.
 
-https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader
+4. Click **Load unpacked** and select the extracted folder.
 
-Also credits the original references listed in that project:
+5. Open any view-only PDF in Google Drive.
 
-https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-
-https://github.com/zeltox/Google-Drive-PDF-Downloader
+6. In the Google Drive menu, click **File** → **Download View-Only PDF**.
+
+The extension will automatically handle the rest: capturing the pages, processing the OCR, generating the final PDF, and starting the download.
+
+## Credits
+
+### OCR Engine
+
+Text recognition is powered by [Tesseract.js](https://github.com/naptha/tesseract.js). All necessary OCR components are bundled directly into the extension, meaning it runs entirely locally on your machine without requiring external cloud services, subscriptions, or API keys.
+
+### Acknowledgments
+
+This project was made possible by the foundational work of the following developers:
+
+- [**zavierferodova**](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader) — Base project
+- [**mhsohan**](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)
+- [**zeltox**](https://github.com/zeltox/Google-Drive-PDF-Downloader)
+
+## Disclaimer
+
+This extension is intended strictly for use with documents you are legally and ethically authorized to access and retain. Please respect the copyright, permissions, and terms of service associated with any file you download.

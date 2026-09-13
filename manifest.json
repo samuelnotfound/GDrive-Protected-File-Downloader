@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PDF Slide Downloader",
-  "version": "1.5.0",
-  "description": "Preloads lazy-loaded PDF pages in Google Drive and exports the loaded page images as a PDF.",
+  "version": "1.8.4",
+  "description": "Captures Google Drive view-only PDF pages, rebuilds them as a PDF, and adds a searchable OCR text layer using a bundled offline OCR engine.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -28,5 +28,15 @@
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/*"
+      ],
+      "matches": [
+        "https://drive.google.com/*"
+      ]
+    }
+  ]
 }
