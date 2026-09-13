@@ -1,0 +1,1195 @@
+(() => {
+  if (window.__PSD_LOADED) return;
+  window.__PSD_LOADED = true;
+
+  const PREFIX = "blob:https://drive.google.com/";
+  const MIN_W = 500;
+  const MIN_H = 300;
+  const DEFAULT_DELAY = 70;
+
+  let running = false;
+  let completed = false;
+  let stopRequested = false;
+  let ready = false;
+  let currentTotalHint = null;
+  let activePort = null;
+  let scrollDelay = DEFAULT_DELAY;
+  const enableOCR = true;
+  const pages = new Map();
+  const capturedPages = new Map();
+  let orderCounter = 0;
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function send(type, data = {}) {
+    const message = {type, ...data};
+    try { chrome.runtime.sendMessage(message); } catch (_) {}
+    try { activePort?.postMessage(message); } catch (_) {}
+    window.dispatchEvent(new CustomEvent("pdfslide:update", {detail: message}));
+  }
+
+  function isClassroomPage() {
+    return location.hostname === "classroom.google.com" || location.hostname.endsWith(".classroom.google.com");
+  }
+
+  function isDrivePage() {
+    return (location.hostname === "drive.google.com" || location.hostname.endsWith(".drive.google.com")) && (location.pathname === "/file" || location.pathname.startsWith("/file/"));
+  }
+
+  const PROTECTED_DOWNLOAD_MENU_ID = "psd-protected-download-menuitem";
+
+  function addProtectedDownloadMenuItem() {
+    if (!isDrivePage() || !document.body) return;
+
+    // Drive rebuilds the File menu dynamically. Work per open menu instead of
+    // using a document-wide "already exists" check, otherwise a stale hidden
+    // copy can prevent the button from being added to the current menu.
+    const menus = [...document.querySelectorAll('[role="menu"]')];
+
+    for (const menu of menus) {
+      if (!menu.offsetParent) continue;
+
+      const menuItems = [...menu.querySelectorAll('li[role="menuitem"]')]
+        .filter(li => li.classList.contains("aqdrmf-rymPhb-ibnC6b"));
+
+      if (!menuItems.length) continue;
+
+      const labels = menuItems.map(li =>
+        li.querySelector('[jsname="K4r5Ff"]')?.textContent?.trim() || ""
+      );
+
+      // If Google Drive provides its normal Download command, leave the menu
+      // completely native. The protected-download command is only needed when
+      // Drive has removed the regular Download option.
+      const hasNativeDownload = menuItems.some(li => {
+        const label = li.querySelector('[jsname="K4r5Ff"]')?.textContent?.trim() || "";
+        return label === "Download";
+      });
+      if (hasNativeDownload) {
+        const existing = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}`);
+        if (existing) existing.remove();
+        const existingDivider = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}-divider`);
+        if (existingDivider) existingDivider.remove();
+        const existingInfo = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}-info`);
+        if (existingInfo) existingInfo.remove();
+        continue;
+      }
+
+      // Only modify the actual File menu. These entries are stable anchors in
+      // the protected-file menu shown by Drive.
+      const hasFileAnchors = labels.some(x => x === "Security limitations") &&
+        labels.some(x => x === "Print");
+      if (!hasFileAnchors) continue;
+
+      if (menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}`)) continue;
+
+      // Use an enabled File-menu row as the visual template. Protected PDFs
+      // often hide/disable Drive's native Download row, while Security
+      // limitations is consistently present and has the correct enabled
+      // typography, spacing and hover behavior.
+      let template = menuItems.find(li => {
+        const label = li.querySelector('[jsname="K4r5Ff"]');
+        return label?.textContent?.trim() === "Security limitations";
+      });
+      if (!template) {
+        template = menuItems.find(li => {
+          const label = li.querySelector('[jsname="K4r5Ff"]');
+          return label?.textContent?.trim() === "Download";
+        });
+      }
+      if (!template) continue;
+
+      const item = template.cloneNode(true);
+      item.id = PROTECTED_DOWNLOAD_MENU_ID;
+      item.removeAttribute("jsaction");
+      item.removeAttribute("aria-disabled");
+      item.removeAttribute("disabled");
+      item.setAttribute("tabindex", "0");
+      item.setAttribute("role", "menuitem");
+      item.setAttribute("aria-label", "Download View-Only PDF");
+
+      const label = item.querySelector('[jsname="K4r5Ff"]');
+      if (label) label.textContent = "Download View-Only PDF";
+
+      const shortcut = item.querySelector('[jsname="orbTae"]');
+      if (shortcut) shortcut.textContent = "";
+
+      const iconHost = item.querySelector('.aqdrmf-rymPhb-KkROqb');
+      if (iconHost) {
+        iconHost.innerHTML = `
+          <span class="notranslate aqdrmf-rymPhb-Abojl aqdrmf-rymPhb-H09UMb-bN97Pc" aria-hidden="true">
+            <svg height="24" viewBox="0 96 960 960" width="24" class="Q6yead QJZfhe">
+              <path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"></path>
+            </svg>
+          </span>`;
+      }
+
+      const closeDriveFileMenu = () => {
+        // The custom row stops propagation so Drive does not execute the
+        // cloned Security-limitations action. Therefore we must close the
+        // File menu explicitly. Do this synchronously by clicking Drive's
+        // actual File button while the menu is definitely open.
+        let closed = false;
+        try {
+          const fileButton = [...document.querySelectorAll('[role="button"], button')]
+            .find(el => {
+              if (!el.offsetParent) return false;
+              const label = (el.getAttribute('aria-label') || '').trim();
+              const text = (el.textContent || '').trim();
+              return label === 'File' || text === 'File';
+            });
+          if (fileButton) {
+            fileButton.click();
+            closed = true;
+          }
+        } catch (_) {}
+
+        // Fallback for Drive versions where the File button is not exposed as
+        // a normal clickable element. Importantly, there is no delayed click
+        // here: the old implementation could close the menu and then click
+        // File again on the next animation frame, reopening it over the
+        // downloader popup.
+        if (!closed) {
+          try {
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+              bubbles: true, cancelable: true
+            }));
+          } catch (_) {}
+        }
+      };
+
+      const openProtectedDownloader = event => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        // The pointer can remain over the cloned row while Drive closes the
+        // menu, so mouseleave is not guaranteed to fire. Clear our hover/focus
+        // styling explicitly before closing the menu.
+        item.style.backgroundColor = "transparent";
+        item.style.borderRadius = "0";
+        try { item.blur(); } catch (_) {}
+
+        closeDriveFileMenu();
+
+        // Show the downloader only after the File menu close command has been
+        // issued. Starting on the next task prevents Drive's menu animation
+        // from briefly painting over the overlay. The overlay itself is never
+        // hidden by this handler.
+        showInPageOverlay(true);
+        const root = document.getElementById("psd-inpage-overlay");
+        root?.classList.remove("quiet", "idle", "completed", "cancelled");
+        if (root) {
+          const title = root.querySelector("#psd-inpage-title");
+          const detail = root.querySelector("#psd-inpage-detail");
+          if (title) title.textContent = "Preparing download";
+          if (detail) detail.textContent = "";
+        }
+        setTimeout(() => start({enableOCR: true}), 0);
+      };
+
+      // Normalize cloned styles/classes so the action is visibly enabled even
+      // when Drive's source row was disabled/greyed in the protected viewer.
+      item.style.cssText = "";
+      item.style.cursor = "pointer";
+      item.style.opacity = "1";
+      item.style.color = "inherit";
+      item.style.pointerEvents = "auto";
+      item.querySelectorAll("*").forEach(el => {
+        el.style.removeProperty("opacity");
+        el.style.removeProperty("color");
+        el.style.pointerEvents = "";
+      });
+      const applyHover = on => {
+        item.style.backgroundColor = on ? "#303134" : "transparent";
+        item.style.borderRadius = on ? "4px" : "0";
+      };
+      item.addEventListener("mouseenter", () => applyHover(true));
+      item.addEventListener("mouseleave", () => applyHover(false));
+      item.addEventListener("focus", () => applyHover(true));
+      item.addEventListener("blur", () => applyHover(false));
+      item.addEventListener("click", openProtectedDownloader);
+      item.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openProtectedDownloader(event);
+        }
+      });
+
+      // Put the protected command at the bottom of the File menu, separated
+      // from Drive's native commands.
+      const divider = document.createElement("li");
+      divider.id = `${PROTECTED_DOWNLOAD_MENU_ID}-divider`;
+      divider.setAttribute("role", "separator");
+      divider.style.cssText = "height:1px; margin:8px 0; padding:0; background:#3c4043; list-style:none;";
+
+      const info = document.createElement("div");
+      info.id = `${PROTECTED_DOWNLOAD_MENU_ID}-info`;
+      info.setAttribute("role", "presentation");
+      info.style.cssText = "padding:0 16px 10px 58px; color:#9aa0a6; font:12px/1.35 Arial,sans-serif; white-space:normal; max-width:330px; box-sizing:border-box; pointer-events:none;";
+      info.textContent = "When a PDF is view-only, regular downloading is not available. This option works around that limitation by capturing each page and automatically combining them into a downloadable PDF.";
+
+      menu.appendChild(divider);
+      menu.appendChild(item);
+      menu.appendChild(info);
+    }
+  }
+
+  function watchDriveMenus() {
+    if (!isDrivePage()) return;
+    const scan = () => addProtectedDownloadMenuItem();
+    scan();
+    const observer = new MutationObserver(() => scan());
+    observer.observe(document.body || document.documentElement, {childList: true, subtree: true});
+  }
+
+  function looksLikePDFName(value = "") {
+    return /\.pdf(?:$|[?#])/i.test(value) || /\bpdf\b/i.test(value) && /\.pdf\b/i.test(value);
+  }
+
+  function findClassroomPdfDriveUrl() {
+    if (!isClassroomPage()) return null;
+
+    const candidates = [...document.querySelectorAll("a[href], [data-url], [href]")];
+    for (const el of candidates) {
+      const href = el.href || el.getAttribute("href") || el.getAttribute("data-url") || "";
+      if (!/drive\.google\.com/i.test(href)) continue;
+
+      const label = [
+        el.textContent || "",
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("title") || "",
+        href
+      ].join(" ");
+
+      if (looksLikePDFName(label)) return href;
+    }
+
+    // Some Classroom viewers expose the PDF filename without a normal anchor.
+    const bodyText = document.body?.innerText || "";
+    if (!looksLikePDFName(document.title) && !looksLikePDFName(bodyText)) return null;
+
+    const driveLink = [...document.querySelectorAll("a[href]")]
+      .map(a => a.href)
+      .find(href => /drive\.google\.com\/(?:file\/d\/|open\?id=)/i.test(href));
+    return driveLink || null;
+  }
+
+  function currentDriveFileIsPDF() {
+    if (!location.hostname.endsWith("drive.google.com")) return false;
+
+    const title = document.title || "";
+    if (looksLikePDFName(title)) return true;
+
+    const bodyText = document.body?.innerText || "";
+    if (/\.pdf\b/i.test(bodyText)) return true;
+
+    const pdfHints = document.querySelectorAll(
+      '[aria-label*=".pdf" i], [title*=".pdf" i], [data-tooltip*=".pdf" i]'
+    );
+    if (pdfHints.length) return true;
+
+    // Google Drive does not require the original filename to end in .pdf.
+    // In the PDF preview, the toolbar exposes a numeric Page X / Y control
+    // and the viewer renders the pages as blob images. That combination is a
+    // stronger signal than the filename and avoids rejecting extensionless PDFs.
+    const pageInfo = getPageInput();
+    const hasPageCounter = /\bPage\s+\d+\s*\/\s*\d+\b/i.test(bodyText) ||
+      !!(pageInfo?.current && pageInfo?.max);
+    if (hasPageCounter && allImages().length > 0) return true;
+
+    return false;
+  }
+
+  async function maybeOpenClassroomPDF() {
+    if (!isClassroomPage()) return false;
+
+    const driveUrl = findClassroomPdfDriveUrl();
+    if (!driveUrl) return false;
+
+    try {
+      await chrome.storage.session.set({psdAutoStart: true});
+    } catch (_) {
+      try { await chrome.storage.local.set({psdAutoStart: true}); } catch (_) {}
+    }
+
+    running = true;
+    send("state", {running: true, ready: false});
+    send("info", {
+      status: "Opening PDF…",
+      detail: "Opening the Classroom PDF in Google Drive."
+    });
+    location.href = driveUrl;
+    return true;
+  }
+
+  async function consumeAutoStart() {
+    let pending = false;
+    try {
+      const result = await chrome.storage.session.get({psdAutoStart: false});
+      pending = !!result.psdAutoStart;
+      if (pending) await chrome.storage.session.remove("psdAutoStart");
+    } catch (_) {
+      try {
+        const result = await chrome.storage.local.get({psdAutoStart: false});
+        pending = !!result.psdAutoStart;
+        if (pending) await chrome.storage.local.remove("psdAutoStart");
+      } catch (_) {}
+    }
+    return pending;
+  }
+
+  function allImages() {
+    return [...document.images].filter(img => {
+      const src = img.currentSrc || img.src || "";
+      return src.startsWith(PREFIX) && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H;
+    });
+  }
+
+  function scan(pageNumber = null) {
+    let added = 0;
+    for (const img of allImages()) {
+      const src = img.currentSrc || img.src;
+      if (!pages.has(src)) {
+        pages.set(src, {src, w: img.naturalWidth, h: img.naturalHeight, order: orderCounter++, pageNumber});
+        added++;
+      } else if (pageNumber != null) {
+        const existing = pages.get(src);
+        if (existing && existing.pageNumber == null) existing.pageNumber = pageNumber;
+      }
+    }
+    return added;
+  }
+
+  function getCurrentPageImage() {
+    const vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 1;
+    const cx = vw / 2;
+    const cy = vh / 2;
+    let best = null;
+    let bestScore = -Infinity;
+
+    for (const img of allImages()) {
+      const r = img.getBoundingClientRect();
+      const visibleW = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+      const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+      if (visibleW < 50 || visibleH < 50) continue;
+      const area = visibleW * visibleH;
+      const fullArea = Math.max(1, r.width * r.height);
+      const mx = r.left + r.width / 2;
+      const my = r.top + r.height / 2;
+      const distance = Math.hypot(mx - cx, my - cy);
+      const score = area * 2 + fullArea - distance * 500;
+      if (score > bestScore) {
+        bestScore = score;
+        best = img;
+      }
+    }
+    return best;
+  }
+
+  async function waitForCurrentPageImage(pageNumber, timeout = 1200) {
+    const start = performance.now();
+    let last = null;
+    while (performance.now() - start < timeout) {
+      const info = getPageInput();
+      if (info && info.current === pageNumber) {
+        const img = getCurrentPageImage();
+        if (img) {
+          last = img;
+          const src = img.currentSrc || img.src || "";
+          if (src && img.complete && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H) return img;
+        }
+      }
+      await sleep(20);
+    }
+    return last;
+  }
+
+  function getPageCountHint() {
+    const text = document.body?.innerText || "";
+    const m = text.match(/Page\s+\d+\s*\/\s*(\d+)/i);
+    if (m) return Number(m[1]);
+    const m2 = text.match(/\bPage\s+\d+\s+of\s+(\d+)\b/i);
+    return m2 ? Number(m2[1]) : null;
+  }
+
+  function resetProgressUI() {
+    const root = document.getElementById("psd-inpage-overlay");
+    if (!root) return;
+    const ring = root.querySelector("#psd-inpage-ring");
+    if (ring) ring.style.strokeDashoffset = "106.8";
+    root.classList.remove("cancelled", "completed");
+  }
+
+  function createInPageOverlay() {
+    if (document.getElementById("psd-scroll-dim")) return;
+
+    const dim = document.createElement("div");
+    dim.id = "psd-scroll-dim";
+    dim.setAttribute("aria-hidden", "true");
+    dim.style.cssText = "position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,.80);pointer-events:auto;display:none;";
+    (document.body || document.documentElement).appendChild(dim);
+
+    if (document.getElementById("psd-inpage-overlay")) return;
+
+    const root = document.createElement("div");
+    root.id = "psd-inpage-overlay";
+    root.innerHTML = `
+      <style>
+        #psd-inpage-overlay{position:fixed;right:24px;bottom:24px;z-index:2147483646;pointer-events:none;font:14px/1.4 Arial,sans-serif;color:#e8eaed}
+        #psd-inpage-card{width:460px;max-width:calc(100vw - 32px);background:#202124;border:1px solid #3c4043;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.45),0 12px 40px rgba(0,0,0,.28);overflow:hidden;pointer-events:auto;position:relative}
+        #psd-inpage-body{padding:18px 20px}
+        #psd-inpage-head{display:grid;grid-template-columns:40px minmax(0,1fr) auto;align-items:center;column-gap:14px;min-height:40px;position:relative}
+        #psd-inpage-spinner,#psd-inpage-check{width:40px;height:40px;flex:0 0 40px;position:relative}
+        #psd-inpage-spinner svg,#psd-inpage-check svg{display:block;width:40px;height:40px}
+        #psd-inpage-spinner svg{transform:rotate(-90deg)}
+        #psd-inpage-spinner .psd-ring-bg{fill:none;stroke:#3c4043;stroke-width:3}
+        #psd-inpage-spinner .psd-ring{fill:none;stroke:#8ab4f8;stroke-width:3;stroke-linecap:round;stroke-dasharray:106.8;stroke-dashoffset:106.8;transition:stroke-dashoffset .15s linear}
+        #psd-inpage-check{display:none}
+        #psd-inpage-check svg{display:block;width:40px;height:40px}
+        #psd-inpage-check circle{fill:none;stroke:#34a853;stroke-width:3}
+        #psd-inpage-check path{fill:none;stroke:#34a853;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+        #psd-inpage-title{font-size:16px;line-height:20px;white-space:nowrap;font-weight:500;color:#e8eaed;letter-spacing:.05px}
+        #psd-inpage-detail{margin-top:4px;font-size:13px;color:#9aa0a6;line-height:18px;min-height:18px}
+        #psd-inpage-actions{display:flex;align-items:center;justify-content:flex-end;width:98px;height:40px;margin:0;align-self:center}
+        #psd-inpage-toggle{width:98px;height:40px;border:1px solid #5f6368;border-radius:4px;padding:0;background:transparent;color:#8ab4f8;cursor:pointer;font:500 13px Arial,sans-serif}
+        #psd-inpage-toggle:hover{background:#303134}
+        #psd-inpage-toggle:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
+        #psd-inpage-close{display:none;position:static;grid-column:3;width:28px;height:28px;border:0;border-radius:50%;background:transparent;color:#9aa0a6;font:22px/28px Arial,sans-serif;cursor:pointer;padding:0}
+        #psd-inpage-close:hover{background:#303134;color:#e8eaed}
+        #psd-inpage-close:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
+        #psd-inpage-overlay.completed #psd-inpage-spinner{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-check{display:block}
+        #psd-inpage-overlay.completed #psd-inpage-close{display:block}
+        #psd-inpage-overlay.completed #psd-inpage-toggle{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-head{grid-template-columns:40px minmax(0,1fr) 28px;min-height:40px}
+        #psd-inpage-overlay.completed #psd-inpage-detail{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-body{padding-right:20px}
+        #psd-inpage-overlay.cancelled #psd-inpage-card{width:auto;min-width:190px}
+        #psd-inpage-overlay.cancelled #psd-inpage-body{padding:16px 18px}
+        #psd-inpage-overlay.cancelled #psd-inpage-head{min-height:0}
+        #psd-inpage-overlay.cancelled #psd-inpage-spinner,
+        #psd-inpage-overlay.cancelled #psd-inpage-actions{display:none}
+        #psd-inpage-overlay.cancelled #psd-inpage-title{font-size:14px}
+        #psd-inpage-overlay.cancelled #psd-inpage-detail{display:none}
+      </style>
+      <div id="psd-inpage-card">
+        <div id="psd-inpage-body">
+          <div id="psd-inpage-head">
+            <div id="psd-inpage-spinner" aria-hidden="true">
+              <svg viewBox="0 0 40 40">
+                <circle class="psd-ring-bg" cx="20" cy="20" r="17"></circle>
+                <circle id="psd-inpage-ring" class="psd-ring" cx="20" cy="20" r="17"></circle>
+              </svg>
+            </div>
+            <div id="psd-inpage-check" aria-hidden="true">
+              <svg viewBox="0 0 40 40">
+                <circle cx="20" cy="20" r="17"></circle>
+                <path d="M11.5 20.5 17 26l11.5-12"></path>
+              </svg>
+            </div>
+            <div>
+              <div id="psd-inpage-title">Preparing download</div>
+              <div id="psd-inpage-detail"></div>
+            </div>
+            <div id="psd-inpage-actions"><button id="psd-inpage-toggle">Cancel</button></div>
+            <button id="psd-inpage-close" aria-label="Close">×</button>
+          </div>
+        </div>
+      </div>`;
+
+    (document.body || document.documentElement).appendChild(root);
+    root.style.display = "none";
+
+    root.querySelector("#psd-inpage-toggle").onclick = () => {
+      if (!running) return;
+      stopRequested = true;
+      root.classList.add("cancelled");
+      root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
+      setTimeout(() => showInPageOverlay(false), 800);
+    };
+    root.querySelector("#psd-inpage-close").onclick = () => showInPageOverlay(false);
+  }
+
+  function updateWindowControl() {
+    const root = document.getElementById("psd-inpage-overlay");
+    if (!root) return;
+    const button = root.querySelector("#psd-inpage-toggle");
+    if (running) {
+      root.classList.remove("idle", "cancelled");
+      button.style.display = "inline-block";
+      button.disabled = false;
+      button.textContent = "Cancel";
+    } else {
+      button.style.display = "none";
+      button.disabled = true;
+    }
+  }
+
+  function showScrollDim(show = true) {
+    const dim = document.getElementById("psd-scroll-dim");
+    if (dim) dim.style.display = show ? "block" : "none";
+  }
+
+  function showInPageOverlay(show = true) {
+    createInPageOverlay();
+    const root = document.getElementById("psd-inpage-overlay");
+    if (root) {
+      root.style.display = show ? "block" : "none";
+      if (show) {
+        root.classList.remove("cancelled", "completed", "unsupported");
+        const spinner = root.querySelector("#psd-inpage-spinner");
+        const check = root.querySelector("#psd-inpage-check");
+        const actions = root.querySelector("#psd-inpage-actions");
+        if (spinner) spinner.style.display = "block";
+        if (check) check.style.display = "none";
+        if (actions) actions.style.display = "block";
+      }
+      updateWindowControl();
+    }
+  }
+
+  function updateInPageOverlay(status, detail, percent, count) {
+    const root = document.getElementById("psd-inpage-overlay");
+    if (!root) return;
+    const title = root.querySelector("#psd-inpage-title");
+    const detailEl = root.querySelector("#psd-inpage-detail");
+    if (title && !root.classList.contains("cancelled")) {
+      title.textContent = /^File downloaded$/i.test(String(status || "")) ? "File downloaded" : "Preparing download";
+    }
+    if (detailEl && !root.classList.contains("cancelled")) {
+      const text = String(detail || "");
+      if (/^Processing page\b/i.test(text)) detailEl.textContent = text;
+      else if (/^Loading page\b/i.test(text)) detailEl.textContent = text;
+      else if (/^Loading pages\b/i.test(text)) detailEl.textContent = text;
+      else if (/^Preparing page\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing page/i, "Loading page");
+      else if (/^Preparing pages\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing pages/i, "Loading pages");
+      else if (/^Preparing your PDF/i.test(text)) detailEl.textContent = "Preparing PDF…";
+      else detailEl.textContent = text;
+    }
+    if (typeof percent === "number") {
+      const safePercent = Math.max(0, Math.min(100, percent));
+      const ring = root.querySelector("#psd-inpage-ring");
+      if (ring) ring.style.strokeDashoffset = `${106.8 - (106.8 * safePercent / 100)}`;
+    }
+  }
+
+  function updateInPageState() {
+    const root = document.getElementById("psd-inpage-overlay");
+    if (!root) return;
+    const button = root.querySelector("#psd-inpage-toggle");
+    button.classList.toggle("stop", running);
+    updateWindowControl();
+  }
+
+  function log(text) { send("info", {log: text}); }
+  let unsupportedTimer = null;
+
+  function ui(status, detail, percent = null, count = null) {
+    send("info", {status, detail, done: count, total: currentTotalHint || count, percent});
+    updateInPageOverlay(status, detail, percent, count);
+  }
+
+  function showUnsupportedFile() {
+    clearTimeout(unsupportedTimer);
+    running = false;
+    ready = false;
+    completed = false;
+    setButtons();
+
+    showInPageOverlay(true);
+    const root = document.getElementById("psd-inpage-overlay");
+    if (root) {
+      root.classList.remove("completed", "cancelled", "minimized");
+      root.classList.add("unsupported");
+      const title = root.querySelector("#psd-inpage-title");
+      const detail = root.querySelector("#psd-inpage-detail");
+      const spinner = root.querySelector("#psd-inpage-spinner");
+      const actions = root.querySelector("#psd-inpage-actions");
+      if (title) title.textContent = "File type not supported";
+      if (detail) detail.textContent = "";
+      if (spinner) spinner.style.display = "none";
+      if (actions) actions.style.display = "none";
+    }
+
+    send("info", {status: "File type not supported", detail: "", done: 0, total: 0, percent: 0});
+    unsupportedTimer = setTimeout(() => {
+      const current = document.getElementById("psd-inpage-overlay");
+      if (current) {
+        current.classList.remove("unsupported");
+        current.style.display = "none";
+      }
+    }, 2000);
+  }
+
+  function setButtons() {
+    send("state", {running, ready, completed});
+    updateInPageState();
+  }
+
+  function findPageInput() {
+    const inputs = [...document.querySelectorAll('input')];
+    return inputs.find(input => {
+      const a = `${input.getAttribute('aria-label') || ''} ${input.getAttribute('title') || ''} ${input.className || ''}`.toLowerCase();
+      const value = input.value?.trim();
+      return /page/.test(a) && /^\d+$/.test(value || '') && input.offsetParent !== null;
+    }) || inputs.find(input => {
+      const value = input.value?.trim();
+      return /^\d+$/.test(value || '') && input.offsetParent !== null && input.clientWidth < 120;
+    });
+  }
+
+  function getPageInput() {
+    const input = findPageInput();
+    if (!input) return null;
+    return {input, current: Number(input.value), max: Number(input.max) || getPageCountHint()};
+  }
+
+  async function goToPage(pageNumber) {
+    const target = String(pageNumber);
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+    // Drive can replace the page-number input while the viewer is rendering.
+    // Re-find it for each attempt and verify that the viewer actually accepted
+    // the requested page before continuing.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const info = getPageInput();
+      if (!info) {
+        await sleep(120);
+        continue;
+      }
+
+      const input = info.input;
+      try { input.focus(); } catch (_) {}
+      if (setter) setter.call(input, target); else input.value = target;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+      input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+
+      const deadline = Date.now() + Math.max(500, scrollDelay + 500);
+      while (Date.now() < deadline) {
+        const current = getPageInput();
+        if (current?.current === pageNumber) {
+          await sleep(scrollDelay);
+          return true;
+        }
+        await sleep(80);
+      }
+    }
+
+    return false;
+  }
+
+  function getScrollableElements() {
+    const result = [];
+    const all = [document.scrollingElement, document.documentElement, document.body, ...document.querySelectorAll('*')];
+    for (const el of all) {
+      if (!el) continue;
+      const canScroll = el.scrollHeight > el.clientHeight + 50 && getComputedStyle(el).overflowY !== 'hidden';
+      if (canScroll) result.push(el);
+    }
+    return [...new Set(result)].sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+  }
+
+  async function scrollViewerStep() {
+    const roots = getScrollableElements();
+    let moved = false;
+    for (const root of roots.slice(0, 8)) {
+      const before = root.scrollTop;
+      const amount = Math.max(500, Math.floor(root.clientHeight * 0.85));
+      root.scrollTop = Math.min(root.scrollTop + amount, root.scrollHeight - root.clientHeight);
+      if (root.scrollTop !== before) moved = true;
+    }
+    window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+    return moved;
+  }
+
+  async function preload() {
+    if (running) return;
+
+    if (!isDrivePage()) return;
+
+    if (!currentDriveFileIsPDF()) {
+      running = false;
+      ready = false;
+      setButtons();
+      showUnsupportedFile();
+      return;
+    }
+
+    running = true;
+    stopRequested = false;
+    ready = false;
+    pages.clear();
+    capturedPages.clear();
+    currentTotalHint = null;
+    resetProgressUI();
+    const overlay = document.getElementById("psd-inpage-overlay");
+    overlay?.classList.remove("minimized");
+    orderCounter = 0;
+    setButtons();
+
+    const pageInfo = getPageInput();
+    const totalHint = pageInfo?.max || getPageCountHint();
+    currentTotalHint = totalHint;
+    showScrollDim(true);
+
+    ui("Preparing…", "Capturing pages…", 0, 0);
+    log(`Detected page count: ${totalHint || "unknown"}`);
+
+    if (pageInfo && totalHint) {
+      // Single-pass capture: navigate to each page and wait for its rendered
+      // image, then capture it immediately. There is no separate warm-up
+      // traversal, so each page is only visited once.
+      log("✓ Starting single-pass capture…");
+      for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
+        const ok = await goToPage(pageNo);
+        if (!ok) break;
+
+        ui("Preparing…", `Capturing page ${pageNo} / ${totalHint}`, Math.floor(pageNo / totalHint * 50), capturedPages.size);
+        const img = await waitForCurrentPageImage(pageNo, 1200);
+        if (img) {
+          const src = img.currentSrc || img.src || "";
+          if (src) {
+            const page = {src, w: img.naturalWidth, h: img.naturalHeight, order: pageNo - 1, pageNumber: pageNo};
+            capturedPages.set(pageNo, page);
+            if (!pages.has(src)) pages.set(src, {...page, order: orderCounter++});
+          }
+        } else {
+          log(`⚠ Could not resolve the rendered image for page ${pageNo}`);
+        }
+
+        const percent = Math.floor(pageNo / totalHint * 50);
+        ui("Preparing…", `Capturing page ${pageNo} / ${totalHint}`, percent, capturedPages.size);
+        if (pageNo === 1 || pageNo % 10 === 0 || pageNo === totalHint) log(`✓ Page ${pageNo}/${totalHint} — ${capturedPages.size} pages captured`);
+      }
+    } else {
+      log("Page-number control not found. Using automatic scrolling fallback…");
+      for (let i = 0; i < 3000 && !stopRequested; i++) {
+        const roots = getScrollableElements();
+        let atBottom = roots.length > 0;
+        for (const root of roots.slice(0, 8)) atBottom = atBottom && root.scrollTop >= root.scrollHeight - root.clientHeight - 10;
+        const before = pages.size;
+        await scrollViewerStep();
+        await sleep(scrollDelay);
+        scan();
+        const percent = totalHint ? Math.min(50, Math.floor(Math.min(pages.size, totalHint) / totalHint * 50)) : Math.min(50, Math.floor((i / 1000) * 50));
+        ui("Preparing…", `Preparing pages — ${pages.size}${totalHint ? " / " + totalHint : ""} captured`, percent, pages.size);
+        if (pages.size > before) log(`✓ ${pages.size}${totalHint ? "/" + totalHint : ""} page images found`);
+        if (atBottom && pages.size === before) {
+          await sleep(300);
+          scan();
+          if (pages.size === before) break;
+        }
+      }
+    }
+
+    if (stopRequested) {
+      showScrollDim(false);
+      running = false;
+      setButtons();
+      const root = document.getElementById("psd-inpage-overlay");
+      if (root) {
+        root.classList.add("cancelled");
+        root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
+        setTimeout(() => showInPageOverlay(false), 800);
+      }
+      log("Preload stopped.");
+      return;
+    }
+
+    if (pageInfo && totalHint && capturedPages.size < totalHint) {
+      const missing = [];
+      for (let pageNo = 1; pageNo <= totalHint; pageNo++) {
+        if (!capturedPages.has(pageNo)) missing.push(pageNo);
+      }
+      log(`⚠ ${missing.length} pages not yet captured. Running recovery check…`);
+      for (let i = 0; i < missing.length && !stopRequested; i++) {
+        const pageNo = missing[i];
+        await goToPage(pageNo);
+        const img = await waitForCurrentPageImage(pageNo, 1800);
+        if (img) {
+          const src = img.currentSrc || img.src || "";
+          if (src) {
+            const page = {src, w: img.naturalWidth, h: img.naturalHeight, order: pageNo - 1, pageNumber: pageNo};
+            capturedPages.set(pageNo, page);
+            if (!pages.has(src)) pages.set(src, {...page, order: orderCounter++});
+          }
+        }
+        ui("Preparing…", `Checking missing page ${pageNo} / ${totalHint}`, 50 + Math.floor((i + 1) / Math.max(1, missing.length) * 25), capturedPages.size);
+      }
+    }
+
+    // Restore the Drive viewer to page 1 after the capture pass finishes.
+    // Keep the dim layer active while navigating back so the return is not distracting.
+    if (pageInfo && totalHint && !stopRequested) {
+      let returnedToFirstPage = false;
+      for (let attempt = 0; attempt < 4 && !stopRequested; attempt++) {
+        if (await goToPage(1)) {
+          const firstPageImage = await waitForCurrentPageImage(1, 1800);
+          const current = getPageInput();
+          if (current?.current === 1 && firstPageImage) {
+            returnedToFirstPage = true;
+            break;
+          }
+        }
+        await sleep(180);
+      }
+      if (!returnedToFirstPage) log("⚠ Could not reliably return the Drive viewer to page 1.");
+      else log("✓ Drive viewer returned to page 1.");
+    }
+
+    showScrollDim(false);
+    const total = totalHint || capturedPages.size || pages.size;
+    ready = capturedPages.size > 0 && (!totalHint || capturedPages.size >= totalHint);
+    running = false;
+    setButtons();
+    ui(ready ? "Ready to process PDF" : "Some pages were not captured",
+       ready ? `${capturedPages.size} / ${total} page images captured` : `${capturedPages.size} / ${total || "?"} page images captured. Try Start again.`,
+       ready ? 100 : Math.min(99, Math.floor(capturedPages.size / Math.max(1, total) * 100)), capturedPages.size);
+    log(ready ? "✓ Capture complete — all pages captured. Starting OCR/PDF processing…" : "⚠ Capture ended before all pages were captured.");
+
+    if (ready && !stopRequested) {
+      await generatePDF();
+    }
+  }
+
+  function safeFilename() {
+    let title = document.querySelector('meta[itemprop="name"]')?.content || document.title || "download.pdf";
+    title = title.replace(/\s*-\s*Google Drive\s*$/i, "").trim();
+    if (!/\.pdf$/i.test(title)) title += ".pdf";
+    return title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
+  }
+
+  let ocrWorker = null;
+  let ocrRequestId = 0;
+  const ocrRequests = new Map();
+
+  function getOCRWorker() {
+    if (ocrWorker) return ocrWorker;
+
+    const workerURL = chrome.runtime.getURL("vendor/ocr-worker.js");
+    ocrWorker = new Worker(workerURL);
+
+    ocrWorker.onmessage = event => {
+      const message = event.data || {};
+
+      if (message.type === "progress") {
+        ocrProgress = Math.max(0, Math.min(1, Number(message.progress) || 0));
+        return;
+      }
+
+      if (message.type !== "result" && message.type !== "error") return;
+
+      const request = ocrRequests.get(message.id);
+      if (!request) return;
+      ocrRequests.delete(message.id);
+
+      if (message.type === "error") request.reject(new Error(message.message || "OCR failed."));
+      else request.resolve(message.words || []);
+    };
+
+    ocrWorker.onerror = event => {
+      const error = new Error(event.message || "Offline OCR worker failed.");
+      for (const request of ocrRequests.values()) request.reject(error);
+      ocrRequests.clear();
+      try { ocrWorker?.terminate(); } catch (_) {}
+      ocrWorker = null;
+    };
+
+    return ocrWorker;
+  }
+
+  async function shutdownOCRWorker() {
+    if (!ocrWorker) return;
+    for (const request of ocrRequests.values()) {
+      request.reject(new Error("OCR worker stopped."));
+    }
+    ocrRequests.clear();
+    try { ocrWorker.terminate(); } catch (_) {}
+    ocrWorker = null;
+  }
+
+  let ocrProgress = 0;
+
+  async function recognizePage(imageBytes) {
+    const worker = getOCRWorker();
+    ocrProgress = 0;
+
+    const id = ++ocrRequestId;
+    return new Promise((resolve, reject) => {
+      ocrRequests.set(id, {resolve, reject});
+      try {
+        worker.postMessage({type: "recognize", id, image: imageBytes}, [imageBytes.buffer]);
+      } catch (error) {
+        ocrRequests.delete(id);
+        reject(error);
+      }
+    });
+  }
+
+  async function imageToJPEG(page) {
+    let img = [...document.images].find(i => (i.currentSrc || i.src) === page.src);
+    if (!img) {
+      img = new Image();
+      img.src = page.src;
+      await img.decode();
+    } else if (!img.complete) await img.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = page.w;
+    canvas.height = page.h;
+    const ctx = canvas.getContext("2d", {alpha: false});
+    ctx.drawImage(img, 0, 0, page.w, page.h);
+    const dataURL = canvas.toDataURL("image/jpeg", 0.92);
+    return {dataURL, width: page.w, height: page.h, canvas};
+  }
+
+  function dataURLBytes(dataURL) {
+    const b64 = dataURL.split(",")[1];
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function pdfEscapeText(text) {
+    return String(text).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)").replace(/[\r\n]+/g, " ");
+  }
+
+  function makePDFWriter(total) {
+    const chunks = [];
+    const offsets = [0];
+    let pos = 0;
+    const enc = new TextEncoder();
+    const pushBytes = b => { chunks.push(b); pos += b.length; };
+    const pushStr = str => pushBytes(enc.encode(str));
+    const pageObj = i => 3 + i * 3;
+    const imageObj = i => 4 + i * 3;
+    const contentObj = i => 5 + i * 3;
+    const fontObj = 3 + total * 3;
+    const maxObj = fontObj;
+
+    pushStr("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    const xref = new Array(maxObj + 1).fill(0);
+    const beginObj = n => { xref[n] = pos; pushStr(`${n} 0 obj\n`); };
+    const endObj = () => pushStr("\nendobj\n");
+
+    beginObj(1); pushStr(`<< /Type /Catalog /Pages 2 0 R >>`); endObj();
+    beginObj(2); pushStr(`<< /Type /Pages /Kids [${Array.from({length: total}, (_, i) => pageObj(i) + " 0 R").join(" ")}] /Count ${total} >>`); endObj();
+
+    return {
+      addPage: (i, im) => {
+        const w = im.width, h = im.height;
+        beginObj(pageObj(i));
+        pushStr(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im${i + 1} ${imageObj(i)} 0 R >> /Font << /F1 ${fontObj} 0 R >> >> /Contents ${contentObj(i)} 0 R >>`);
+        endObj();
+        const bytes = im.bytes;
+        beginObj(imageObj(i));
+        pushStr(`<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${bytes.length} >>\nstream\n`);
+        pushBytes(bytes); pushStr("\nendstream"); endObj();
+
+        let content = `q\n${w} 0 0 ${h} 0 0 cm\n/Im${i + 1} Do\nQ\n`;
+        if (Array.isArray(im.words) && im.words.length) {
+          content += "BT\n/F1 10 Tf\n3 Tr\n";
+          for (const word of im.words) {
+            const height = Math.max(4, word.y1 - word.y0);
+            const size = Math.max(4, Math.min(72, height * 0.9));
+            const x = word.x0;
+            const y = h - word.y1 + Math.max(0, (word.y1 - word.y0) * 0.12);
+            content += `1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm\n/F1 ${size.toFixed(2)} Tf\n(${pdfEscapeText(word.text)}) Tj\n`;
+          }
+          content += "0 Tr\nET\n";
+        }
+        const contentBytes = enc.encode(content);
+        beginObj(contentObj(i)); pushStr(`<< /Length ${contentBytes.length} >>\nstream\n`); pushBytes(contentBytes); pushStr("endstream"); endObj();
+      },
+      finish: () => {
+        beginObj(fontObj); pushStr(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`); endObj();
+        const xrefPos = pos;
+        pushStr(`xref\n0 ${maxObj + 1}\n0000000000 65535 f \n`);
+        for (let n = 1; n <= maxObj; n++) pushStr(String(xref[n]).padStart(10, "0") + " 00000 n \n");
+        pushStr(`trailer\n<< /Size ${maxObj + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`);
+        return new Blob(chunks, {type: "application/pdf"});
+      }
+    };
+  }
+
+  async function generatePDF() {
+    if (running || (!capturedPages.size && !pages.size)) return;
+    running = true;
+    stopRequested = false;
+    const overlay = document.getElementById("psd-inpage-overlay");
+    if (overlay) {
+      overlay.classList.remove("quiet");
+      overlay.classList.remove("idle");
+    }
+    setButtons();
+
+    const ordered = capturedPages.size
+      ? [...capturedPages.values()].sort((a, b) => a.pageNumber - b.pageNumber)
+      : [...pages.values()].sort((a, b) => a.order - b.order);
+    const total = ordered.length;
+    const writer = makePDFWriter(total);
+
+    ui("Preparing…", `Processing page 0 / ${total}`, 50, 0);
+    log(`Generating ${total}-page PDF…`);
+
+    let converted = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      if (stopRequested) break;
+      try {
+        ui("Preparing…", `Processing page ${i + 1} / ${total}`, 50 + Math.floor(i / total * 48), i);
+        const jpeg = await imageToJPEG(ordered[i]);
+        let words = [];
+        if (enableOCR) {
+          ui("Preparing…", `OCR page ${i + 1} / ${total}`, 50 + Math.floor((i + 0.35) / total * 48), i);
+          try {
+            words = await recognizePage(dataURLBytes(jpeg.dataURL));
+          } catch (ocrError) {
+            log(`⚠ OCR unavailable (${ocrError.message}). Continuing without OCR.`);
+          }
+        }
+        writer.addPage(i, {width: jpeg.width, height: jpeg.height, bytes: dataURLBytes(jpeg.dataURL), words});
+        converted++;
+        if ((i + 1) % 5 === 0 || i === ordered.length - 1) log(`✓ Processed ${i + 1}/${total}`);
+        await sleep(0);
+      } catch (e) {
+        log(`✕ Page ${i + 1}: ${e.message}`);
+      }
+    }
+
+    if (stopRequested || converted !== total) {
+      running = false;
+      setButtons();
+      if (stopRequested) {
+        const root = document.getElementById("psd-inpage-overlay");
+        if (root) {
+          root.classList.add("cancelled");
+          root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
+          setTimeout(() => showInPageOverlay(false), 800);
+        }
+        await shutdownOCRWorker();
+        log("PDF generation stopped.");
+      } else {
+        ui("PDF incomplete", `${converted} of ${total} pages were converted. No download was made.`, 0, converted);
+      }
+      return;
+    }
+
+    ui("Preparing…", "Finalizing the PDF file", 99, converted);
+    await sleep(50);
+    await shutdownOCRWorker();
+    const blob = writer.finish();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeFilename();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    running = false;
+    completed = false;
+    ready = false;
+    pages.clear();
+    capturedPages.clear();
+    orderCounter = 0;
+    currentTotalHint = null;
+    setButtons();
+    ui("File downloaded", "", 100, converted);
+    const doneRoot = document.getElementById("psd-inpage-overlay");
+    if (doneRoot) {
+      doneRoot.classList.remove("cancelled", "unsupported");
+      doneRoot.classList.add("completed");
+      const doneSpinner = doneRoot.querySelector("#psd-inpage-spinner");
+      const doneCheck = doneRoot.querySelector("#psd-inpage-check");
+      const doneActions = doneRoot.querySelector("#psd-inpage-actions");
+      const doneTitle = doneRoot.querySelector("#psd-inpage-title");
+      const doneDetail = doneRoot.querySelector("#psd-inpage-detail");
+      if (doneSpinner) doneSpinner.style.display = "none";
+      if (doneCheck) doneCheck.style.display = "block";
+      if (doneActions) doneActions.style.display = "none";
+      if (doneTitle) doneTitle.textContent = "File downloaded";
+      if (doneDetail) doneDetail.textContent = "";
+    }
+    updateWindowControl();
+    log(`✓ Downloaded ${safeFilename()}`);
+
+  }
+
+  async function start(options = {}) {
+    if (running) return;
+    completed = false;
+    resetProgressUI();
+    await preload();
+  }
+
+  function handleCommand(msg) {
+    if (msg.type === "init") {
+      setButtons();
+      if (!isDrivePage()) {
+        const root = document.getElementById("psd-inpage-overlay");
+        if (root) root.remove();
+        return;
+      } else if (!currentDriveFileIsPDF()) {
+        showUnsupportedFile();
+      } else {
+        ui("Ready", "", ready ? 100 : null, ready ? 0 : 0);
+      }
+    }
+    if (msg.type === "start") start();
+    if (msg.type === "stop") stopRequested = true;
+    if (msg.type === "openOverlay") {
+      showInPageOverlay(true);
+      updateInPageState();
+    }
+  }
+
+  chrome.runtime.onConnect.addListener(port => {
+    if (port.name !== "pdf-downloader") return;
+    activePort = port;
+    port.onMessage.addListener(handleCommand);
+    port.onDisconnect.addListener(() => {
+      if (activePort === port) activePort = null;
+      // Do not reopen the overlay when the popup/port disconnects.
+      updateInPageState();
+    });
+    updateInPageState();
+    handleCommand({type: "init"});
+  });
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    handleCommand(msg);
+    sendResponse?.({ok: true});
+    return true;
+  });
+
+  // Keep one consistent in-page controller. It never hides when the extension popup opens.
+
+  if (isDrivePage()) {
+    createInPageOverlay();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => watchDriveMenus(), {once: true});
+    } else {
+      watchDriveMenus();
+    }
+  }
+
+  // If Start was pressed from a Classroom PDF preview, resume automatically
+  // after the page has navigated into Google Drive.
+  if (location.hostname.endsWith("drive.google.com")) {
+    consumeAutoStart().then(pending => {
+      if (pending) {
+        const waitForViewer = () => {
+          if (currentDriveFileIsPDF()) start();
+          else setTimeout(waitForViewer, 100);
+        };
+        waitForViewer();
+      }
+    });
+  }
+})();

@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "GDrive View-Only PDF Downloader",
+  "version": "1.8.4",
+  "description": "Captures Google Drive view-only PDF pages, rebuilds them as a PDF, and adds a searchable OCR text layer using a bundled offline OCR engine.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://drive.google.com/file/*"
+  ],
+  "action": {
+    "default_title": "PDF Slide Downloader"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://drive.google.com/file/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/*"
+      ],
+      "matches": [
+        "https://drive.google.com/*"
+      ]
+    }
+  ]
+}
