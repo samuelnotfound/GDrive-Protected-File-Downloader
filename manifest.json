@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "PDF Slide Downloader",
+  "version": "1.5.0",
+  "description": "Preloads lazy-loaded PDF pages in Google Drive and exports the loaded page images as a PDF.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://drive.google.com/file/*"
+  ],
+  "action": {
+    "default_title": "PDF Slide Downloader"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://drive.google.com/file/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
