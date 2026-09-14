@@ -178,7 +178,7 @@
       info.id = `${PROTECTED_DOWNLOAD_MENU_ID}-info`;
       info.setAttribute("role", "presentation");
       info.style.cssText = "padding:0 16px 10px 58px; color:#9aa0a6; font:12px/1.35 Arial,sans-serif; white-space:normal; max-width:330px; box-sizing:border-box; pointer-events:none;";
-      info.textContent = "When a PDF is view-only, regular downloading is not available. This option works around that limitation by capturing each page in high resolution and automatically combining them into a downloadable PDF.";
+      info.textContent = "When a PDF is view-only, regular downloading is not available. This option works around that limitation by capturing each page and automatically combining them into a downloadable PDF.";
 
       menu.appendChild(divider);
       menu.appendChild(item);
