@@ -1,7 +1,7 @@
 # Google Drive View-Only PDF Downloader
-A Chrome extension designed to bypass Google Drive's download restrictions on view-only PDF files.
+A Chrome extension that adds a download button on the menubar for view-only PDF files.
 
-Unlike a standard file download, this tool acts as a workaround. It captures the document's pages as they are rendered in the Google Drive viewer and stitches them together into a new PDF file. It then runs Optical Character Recognition (OCR) on each page, making the final downloaded PDF fully text-searchable.
+This tool acts as a workaround and does not download the actual file. It captures the document's pages as they are rendered in the Google Drive viewer and stitches them together into a new PDF file. It then runs Optical Character Recognition (OCR) on each page, making the final downloaded PDF fully text-searchable.
 
 ## Installation 
 1. Download and extract the extension's ZIP file.
