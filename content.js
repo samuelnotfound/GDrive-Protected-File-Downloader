@@ -124,9 +124,58 @@
           </span>`;
       }
 
+      const closeDriveFileMenu = () => {
+        // The custom row stops propagation so Drive does not execute the
+        // cloned Security-limitations action. Therefore we must close the
+        // File menu explicitly. Do this synchronously by clicking Drive's
+        // actual File button while the menu is definitely open.
+        let closed = false;
+        try {
+          const fileButton = [...document.querySelectorAll('[role="button"], button')]
+            .find(el => {
+              if (!el.offsetParent) return false;
+              const label = (el.getAttribute('aria-label') || '').trim();
+              const text = (el.textContent || '').trim();
+              return label === 'File' || text === 'File';
+            });
+          if (fileButton) {
+            fileButton.click();
+            closed = true;
+          }
+        } catch (_) {}
+
+        // Fallback for Drive versions where the File button is not exposed as
+        // a normal clickable element. Importantly, there is no delayed click
+        // here: the old implementation could close the menu and then click
+        // File again on the next animation frame, reopening it over the
+        // downloader popup.
+        if (!closed) {
+          try {
+            document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+              bubbles: true, cancelable: true
+            }));
+          } catch (_) {}
+        }
+      };
+
       const openProtectedDownloader = event => {
         event.preventDefault();
         event.stopPropagation();
+
+        // The pointer can remain over the cloned row while Drive closes the
+        // menu, so mouseleave is not guaranteed to fire. Clear our hover/focus
+        // styling explicitly before closing the menu.
+        item.style.backgroundColor = "transparent";
+        item.style.borderRadius = "0";
+        try { item.blur(); } catch (_) {}
+
+        closeDriveFileMenu();
+
+        // Show the downloader only after the File menu close command has been
+        // issued. Starting on the next task prevents Drive's menu animation
+        // from briefly painting over the overlay. The overlay itself is never
+        // hidden by this handler.
         showInPageOverlay(true);
         const root = document.getElementById("psd-inpage-overlay");
         root?.classList.remove("quiet", "idle", "completed", "cancelled");
@@ -136,7 +185,7 @@
           if (title) title.textContent = "Preparing download";
           if (detail) detail.textContent = "";
         }
-        start({enableOCR: true});
+        setTimeout(() => start({enableOCR: true}), 0);
       };
 
       // Normalize cloned styles/classes so the action is visibly enabled even
@@ -235,10 +284,21 @@
     const bodyText = document.body?.innerText || "";
     if (/\.pdf\b/i.test(bodyText)) return true;
 
-    const pdfHints = [
-      ...document.querySelectorAll('[aria-label*=".pdf" i], [title*=".pdf" i], [data-tooltip*=".pdf" i]')
-    ];
-    return pdfHints.length > 0;
+    const pdfHints = document.querySelectorAll(
+      '[aria-label*=".pdf" i], [title*=".pdf" i], [data-tooltip*=".pdf" i]'
+    );
+    if (pdfHints.length) return true;
+
+    // Google Drive does not require the original filename to end in .pdf.
+    // In the PDF preview, the toolbar exposes a numeric Page X / Y control
+    // and the viewer renders the pages as blob images. That combination is a
+    // stronger signal than the filename and avoids rejecting extensionless PDFs.
+    const pageInfo = getPageInput();
+    const hasPageCounter = /\bPage\s+\d+\s*\/\s*\d+\b/i.test(bodyText) ||
+      !!(pageInfo?.current && pageInfo?.max);
+    if (hasPageCounter && allImages().length > 0) return true;
+
+    return false;
   }
 
   async function maybeOpenClassroomPDF() {
@@ -354,19 +414,6 @@
     return m2 ? Number(m2[1]) : null;
   }
 
-  async function waitForPageImage(previousSources, timeout = 700) {
-    const start = performance.now();
-    while (performance.now() - start < timeout) {
-      const found = allImages().some(img => {
-        const src = img.currentSrc || img.src || "";
-        return src && !previousSources.has(src);
-      });
-      if (found) return true;
-      await sleep(10);
-    }
-    return false;
-  }
-
   function resetProgressUI() {
     const root = document.getElementById("psd-inpage-overlay");
     if (!root) return;
@@ -376,6 +423,14 @@
   }
 
   function createInPageOverlay() {
+    if (document.getElementById("psd-scroll-dim")) return;
+
+    const dim = document.createElement("div");
+    dim.id = "psd-scroll-dim";
+    dim.setAttribute("aria-hidden", "true");
+    dim.style.cssText = "position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,.80);pointer-events:auto;display:none;";
+    (document.body || document.documentElement).appendChild(dim);
+
     if (document.getElementById("psd-inpage-overlay")) return;
 
     const root = document.createElement("div");
@@ -383,30 +438,34 @@
     root.innerHTML = `
       <style>
         #psd-inpage-overlay{position:fixed;right:24px;bottom:24px;z-index:2147483646;pointer-events:none;font:14px/1.4 Arial,sans-serif;color:#e8eaed}
-        #psd-inpage-card{width:460px;background:#202124;border:1px solid #3c4043;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.45),0 12px 40px rgba(0,0,0,.28);overflow:hidden;pointer-events:auto;position:relative}
+        #psd-inpage-card{width:460px;max-width:calc(100vw - 32px);background:#202124;border:1px solid #3c4043;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.45),0 12px 40px rgba(0,0,0,.28);overflow:hidden;pointer-events:auto;position:relative}
         #psd-inpage-body{padding:18px 20px}
-        #psd-inpage-head{display:grid;grid-template-columns:38px minmax(0,1fr) auto;align-items:center;column-gap:14px;min-height:38px;position:relative}
-        #psd-inpage-spinner{width:38px;height:38px;flex:0 0 38px;position:relative}
-        #psd-inpage-spinner svg{display:block;width:38px;height:38px;transform:rotate(-90deg)}
+        #psd-inpage-head{display:grid;grid-template-columns:40px minmax(0,1fr) auto;align-items:center;column-gap:14px;min-height:40px;position:relative}
+        #psd-inpage-spinner,#psd-inpage-check{width:40px;height:40px;flex:0 0 40px;position:relative}
+        #psd-inpage-spinner svg,#psd-inpage-check svg{display:block;width:40px;height:40px}
+        #psd-inpage-spinner svg{transform:rotate(-90deg)}
         #psd-inpage-spinner .psd-ring-bg{fill:none;stroke:#3c4043;stroke-width:3}
         #psd-inpage-spinner .psd-ring{fill:none;stroke:#8ab4f8;stroke-width:3;stroke-linecap:round;stroke-dasharray:106.8;stroke-dashoffset:106.8;transition:stroke-dashoffset .15s linear}
-        #psd-inpage-check{display:none;width:38px;height:38px;flex:0 0 38px}
-        #psd-inpage-check svg{display:block;width:38px;height:38px}
+        #psd-inpage-check{display:none}
+        #psd-inpage-check svg{display:block;width:40px;height:40px}
         #psd-inpage-check circle{fill:none;stroke:#34a853;stroke-width:3}
         #psd-inpage-check path{fill:none;stroke:#34a853;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
-        #psd-inpage-title{font-size:16px;white-space:nowrap;font-weight:500;color:#e8eaed;letter-spacing:.05px}
-        #psd-inpage-detail{margin-top:4px;font-size:13px;color:#9aa0a6;line-height:1.45}
-        #psd-inpage-actions{display:flex;align-items:center;justify-content:center;margin:0;align-self:center;min-width:98px}
-        #psd-inpage-toggle{border:1px solid #5f6368;border-radius:4px;padding:8px 18px;background:transparent;color:#8ab4f8;cursor:pointer;font:500 13px Arial,sans-serif}
+        #psd-inpage-title{font-size:16px;line-height:20px;white-space:nowrap;font-weight:500;color:#e8eaed;letter-spacing:.05px}
+        #psd-inpage-detail{margin-top:4px;font-size:13px;color:#9aa0a6;line-height:18px;min-height:18px}
+        #psd-inpage-actions{display:flex;align-items:center;justify-content:flex-end;width:98px;height:40px;margin:0;align-self:center}
+        #psd-inpage-toggle{width:98px;height:40px;border:1px solid #5f6368;border-radius:4px;padding:0;background:transparent;color:#8ab4f8;cursor:pointer;font:500 13px Arial,sans-serif}
         #psd-inpage-toggle:hover{background:#303134}
         #psd-inpage-toggle:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
-        #psd-inpage-close{display:none;position:absolute;top:8px;right:8px;width:28px;height:28px;border:0;border-radius:50%;background:transparent;color:#9aa0a6;font:22px/28px Arial,sans-serif;cursor:pointer;padding:0}
+        #psd-inpage-close{display:none;position:static;grid-column:3;width:28px;height:28px;border:0;border-radius:50%;background:transparent;color:#9aa0a6;font:22px/28px Arial,sans-serif;cursor:pointer;padding:0}
         #psd-inpage-close:hover{background:#303134;color:#e8eaed}
         #psd-inpage-close:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
         #psd-inpage-overlay.completed #psd-inpage-spinner{display:none}
         #psd-inpage-overlay.completed #psd-inpage-check{display:block}
         #psd-inpage-overlay.completed #psd-inpage-close{display:block}
         #psd-inpage-overlay.completed #psd-inpage-toggle{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-head{grid-template-columns:40px minmax(0,1fr) 28px;min-height:40px}
+        #psd-inpage-overlay.completed #psd-inpage-detail{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-body{padding-right:20px}
         #psd-inpage-overlay.cancelled #psd-inpage-card{width:auto;min-width:190px}
         #psd-inpage-overlay.cancelled #psd-inpage-body{padding:16px 18px}
         #psd-inpage-overlay.cancelled #psd-inpage-head{min-height:0}
@@ -443,7 +502,6 @@
     (document.body || document.documentElement).appendChild(root);
     root.style.display = "none";
 
-
     root.querySelector("#psd-inpage-toggle").onclick = () => {
       if (!running) return;
       stopRequested = true;
@@ -469,12 +527,25 @@
     }
   }
 
+  function showScrollDim(show = true) {
+    const dim = document.getElementById("psd-scroll-dim");
+    if (dim) dim.style.display = show ? "block" : "none";
+  }
+
   function showInPageOverlay(show = true) {
     createInPageOverlay();
     const root = document.getElementById("psd-inpage-overlay");
     if (root) {
       root.style.display = show ? "block" : "none";
-      if (show) root.classList.remove("cancelled", "completed");
+      if (show) {
+        root.classList.remove("cancelled", "completed", "unsupported");
+        const spinner = root.querySelector("#psd-inpage-spinner");
+        const check = root.querySelector("#psd-inpage-check");
+        const actions = root.querySelector("#psd-inpage-actions");
+        if (spinner) spinner.style.display = "block";
+        if (check) check.style.display = "none";
+        if (actions) actions.style.display = "block";
+      }
       updateWindowControl();
     }
   }
@@ -513,10 +584,45 @@
   }
 
   function log(text) { send("info", {log: text}); }
+  let unsupportedTimer = null;
+
   function ui(status, detail, percent = null, count = null) {
     send("info", {status, detail, done: count, total: currentTotalHint || count, percent});
     updateInPageOverlay(status, detail, percent, count);
   }
+
+  function showUnsupportedFile() {
+    clearTimeout(unsupportedTimer);
+    running = false;
+    ready = false;
+    completed = false;
+    setButtons();
+
+    showInPageOverlay(true);
+    const root = document.getElementById("psd-inpage-overlay");
+    if (root) {
+      root.classList.remove("completed", "cancelled", "minimized");
+      root.classList.add("unsupported");
+      const title = root.querySelector("#psd-inpage-title");
+      const detail = root.querySelector("#psd-inpage-detail");
+      const spinner = root.querySelector("#psd-inpage-spinner");
+      const actions = root.querySelector("#psd-inpage-actions");
+      if (title) title.textContent = "File type not supported";
+      if (detail) detail.textContent = "";
+      if (spinner) spinner.style.display = "none";
+      if (actions) actions.style.display = "none";
+    }
+
+    send("info", {status: "File type not supported", detail: "", done: 0, total: 0, percent: 0});
+    unsupportedTimer = setTimeout(() => {
+      const current = document.getElementById("psd-inpage-overlay");
+      if (current) {
+        current.classList.remove("unsupported");
+        current.style.display = "none";
+      }
+    }, 2000);
+  }
+
   function setButtons() {
     send("state", {running, ready, completed});
     updateInPageState();
@@ -587,7 +693,7 @@
       running = false;
       ready = false;
       setButtons();
-      ui("Fily type not supported", "This file is not a PDF.", 0, 0);
+      showUnsupportedFile();
       return;
     }
 
@@ -606,31 +712,21 @@
     const pageInfo = getPageInput();
     const totalHint = pageInfo?.max || getPageCountHint();
     currentTotalHint = totalHint;
+    showScrollDim(true);
 
-    ui("Preparing…", "Loading pages…", 0, 0);
+    ui("Preparing…", "Capturing pages…", 0, 0);
     log(`Detected page count: ${totalHint || "unknown"}`);
 
     if (pageInfo && totalHint) {
-      // Fast warm-up pass: visit every page first so Drive has a chance to
-      // populate/cache its lazy-loaded page images before we capture them.
-      // This pass deliberately does not scan or store images.
-      log("✓ Starting fast page warm-up…");
-      for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
-        const ok = await goToPage(pageNo);
-        if (!ok) break;
-        ui("Preparing…", `Loading page ${pageNo} / ${totalHint}`, Math.floor(pageNo / totalHint * 20), 0);
-        if (pageNo === 1 || pageNo % 25 === 0 || pageNo === totalHint) log(`✓ Warm-up ${pageNo}/${totalHint}`);
-        await sleep(70);
-      }
-
-      // Return to page 1 so capture order always starts at the beginning.
-      if (!stopRequested) await goToPage(1);
-
-      log("✓ Warm-up complete. Capturing pages…");
+      // Single-pass capture: navigate to each page and wait for its rendered
+      // image, then capture it immediately. There is no separate warm-up
+      // traversal, so each page is only visited once.
+      log("✓ Starting single-pass capture…");
       for (let pageNo = 1; pageNo <= totalHint && !stopRequested; pageNo++) {
         const ok = await goToPage(pageNo);
         if (!ok) break;
 
+        ui("Preparing…", `Capturing page ${pageNo} / ${totalHint}`, Math.floor(pageNo / totalHint * 50), capturedPages.size);
         const img = await waitForCurrentPageImage(pageNo, 1200);
         if (img) {
           const src = img.currentSrc || img.src || "";
@@ -643,7 +739,7 @@
           log(`⚠ Could not resolve the rendered image for page ${pageNo}`);
         }
 
-        const percent = 20 + Math.floor(pageNo / totalHint * 30);
+        const percent = Math.floor(pageNo / totalHint * 50);
         ui("Preparing…", `Capturing page ${pageNo} / ${totalHint}`, percent, capturedPages.size);
         if (pageNo === 1 || pageNo % 10 === 0 || pageNo === totalHint) log(`✓ Page ${pageNo}/${totalHint} — ${capturedPages.size} pages captured`);
       }
@@ -669,6 +765,7 @@
     }
 
     if (stopRequested) {
+      showScrollDim(false);
       running = false;
       setButtons();
       const root = document.getElementById("psd-inpage-overlay");
@@ -703,6 +800,14 @@
       }
     }
 
+    // Restore the Drive viewer to page 1 after the capture pass finishes.
+    // Keep the dim layer active while navigating back so the return is not distracting.
+    if (pageInfo && totalHint && !stopRequested) {
+      await goToPage(1);
+      await waitForCurrentPageImage(1, 1200);
+    }
+
+    showScrollDim(false);
     const total = totalHint || capturedPages.size || pages.size;
     ready = capturedPages.size > 0 && (!totalHint || capturedPages.size >= totalHint);
     running = false;
@@ -964,13 +1069,22 @@
     ui("File downloaded", "", 100, converted);
     const doneRoot = document.getElementById("psd-inpage-overlay");
     if (doneRoot) {
-      doneRoot.classList.remove("cancelled");
+      doneRoot.classList.remove("cancelled", "unsupported");
       doneRoot.classList.add("completed");
-      doneRoot.querySelector("#psd-inpage-title").textContent = "File downloaded";
-      doneRoot.querySelector("#psd-inpage-detail").textContent = "";
+      const doneSpinner = doneRoot.querySelector("#psd-inpage-spinner");
+      const doneCheck = doneRoot.querySelector("#psd-inpage-check");
+      const doneActions = doneRoot.querySelector("#psd-inpage-actions");
+      const doneTitle = doneRoot.querySelector("#psd-inpage-title");
+      const doneDetail = doneRoot.querySelector("#psd-inpage-detail");
+      if (doneSpinner) doneSpinner.style.display = "none";
+      if (doneCheck) doneCheck.style.display = "block";
+      if (doneActions) doneActions.style.display = "none";
+      if (doneTitle) doneTitle.textContent = "File downloaded";
+      if (doneDetail) doneDetail.textContent = "";
     }
     updateWindowControl();
     log(`✓ Downloaded ${safeFilename()}`);
+
   }
 
   async function start(options = {}) {
@@ -980,7 +1094,6 @@
     await preload();
   }
 
-
   function handleCommand(msg) {
     if (msg.type === "init") {
       setButtons();
@@ -989,7 +1102,7 @@
         if (root) root.remove();
         return;
       } else if (!currentDriveFileIsPDF()) {
-        ui("Fily type not supported", "This file is not a PDF.", 0, 0);
+        showUnsupportedFile();
       } else {
         ui("Ready", "", ready ? 100 : null, ready ? 0 : 0);
       }
