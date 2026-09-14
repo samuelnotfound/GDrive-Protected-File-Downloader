@@ -647,17 +647,39 @@
   }
 
   async function goToPage(pageNumber) {
-    const info = getPageInput();
-    if (!info) return false;
-    const input = info.input;
+    const target = String(pageNumber);
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    if (setter) setter.call(input, String(pageNumber)); else input.value = String(pageNumber);
-    input.dispatchEvent(new Event('input', {bubbles: true}));
-    input.dispatchEvent(new Event('change', {bubbles: true}));
-    input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-    input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-    await sleep(scrollDelay);
-    return true;
+
+    // Drive can replace the page-number input while the viewer is rendering.
+    // Re-find it for each attempt and verify that the viewer actually accepted
+    // the requested page before continuing.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const info = getPageInput();
+      if (!info) {
+        await sleep(120);
+        continue;
+      }
+
+      const input = info.input;
+      try { input.focus(); } catch (_) {}
+      if (setter) setter.call(input, target); else input.value = target;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+      input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+
+      const deadline = Date.now() + Math.max(500, scrollDelay + 500);
+      while (Date.now() < deadline) {
+        const current = getPageInput();
+        if (current?.current === pageNumber) {
+          await sleep(scrollDelay);
+          return true;
+        }
+        await sleep(80);
+      }
+    }
+
+    return false;
   }
 
   function getScrollableElements() {
@@ -803,8 +825,20 @@
     // Restore the Drive viewer to page 1 after the capture pass finishes.
     // Keep the dim layer active while navigating back so the return is not distracting.
     if (pageInfo && totalHint && !stopRequested) {
-      await goToPage(1);
-      await waitForCurrentPageImage(1, 1200);
+      let returnedToFirstPage = false;
+      for (let attempt = 0; attempt < 4 && !stopRequested; attempt++) {
+        if (await goToPage(1)) {
+          const firstPageImage = await waitForCurrentPageImage(1, 1800);
+          const current = getPageInput();
+          if (current?.current === 1 && firstPageImage) {
+            returnedToFirstPage = true;
+            break;
+          }
+        }
+        await sleep(180);
+      }
+      if (!returnedToFirstPage) log("⚠ Could not reliably return the Drive viewer to page 1.");
+      else log("✓ Drive viewer returned to page 1.");
     }
 
     showScrollDim(false);
