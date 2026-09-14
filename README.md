@@ -13,9 +13,6 @@ Unlike a standard file download, this tool acts as a workaround. It captures the
 - Open any view-only PDF in Google Drive.
 - If the PDF was opened through Google Classroom, first click **File** → **Open** → **Open in new tab** to open it directly in Google Drive. Then click **File** → **Download View-Only PDF**.
 
-## Note
-This project was built with the assistance of AI tools in development, debugging, and documentation.
-
 ## Credits
 
 ### OCR Engine
@@ -28,4 +25,16 @@ This project was made possible by the foundational work of the following develop
 - [**zeltox**](https://github.com/zeltox/Google-Drive-PDF-Downloader)
 
 ## Disclaimer
+This project was built with the assistance of AI tools in development, debugging, and documentation.
+
 This extension is intended strictly for use with documents you are legally and ethically authorized to access and retain. Please respect the copyright, permissions, and terms of service associated with any file you download.
+
+
+
+
+
+
+
+
+
+
