@@ -65,13 +65,11 @@
         const label = li.querySelector('[jsname="K4r5Ff"]')?.textContent?.trim() || "";
         return label === "Download";
       });
-      if (hasNativeDownload) {
-        const existing = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}`);
-        if (existing) existing.remove();
-        const existingDivider = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}-divider`);
-        if (existingDivider) existingDivider.remove();
-        const existingInfo = menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}-info`);
-        if (existingInfo) existingInfo.remove();
+      // Keep our command available even if Drive temporarily exposes its
+      // native Download row. Drive can rebuild/retoggle that row while the
+      // viewer is active; removing our row here caused it to disappear until
+      // another menu rebuild.
+      if (hasNativeDownload && menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}`)) {
         continue;
       }
 
@@ -437,42 +435,31 @@
     root.id = "psd-inpage-overlay";
     root.innerHTML = `
       <style>
-        #psd-inpage-overlay{position:fixed;right:24px;bottom:24px;z-index:2147483646;pointer-events:none;font:14px/1.4 Arial,sans-serif;color:#e8eaed}
-        #psd-inpage-card{width:460px;max-width:calc(100vw - 32px);background:#202124;border:1px solid #3c4043;border-radius:10px;box-shadow:0 4px 18px rgba(0,0,0,.45),0 12px 40px rgba(0,0,0,.28);overflow:hidden;pointer-events:auto;position:relative}
-        #psd-inpage-body{padding:18px 20px}
-        #psd-inpage-head{display:grid;grid-template-columns:40px minmax(0,1fr) auto;align-items:center;column-gap:14px;min-height:40px;position:relative}
-        #psd-inpage-spinner,#psd-inpage-check{width:40px;height:40px;flex:0 0 40px;position:relative}
-        #psd-inpage-spinner svg,#psd-inpage-check svg{display:block;width:40px;height:40px}
+        #psd-inpage-overlay{position:fixed;right:10px;bottom:10px;z-index:2147483646;pointer-events:none;font:14px/1.4 Roboto,Arial,sans-serif;color:#e8eaed}
+        #psd-inpage-card{width:430px;height:72px;max-width:calc(100vw - 20px);box-sizing:border-box;background:#2b2f35;border:0;border-radius:22px;box-shadow:0 2px 12px rgba(0,0,0,.32);overflow:hidden;pointer-events:auto;position:relative}
+        #psd-inpage-body{height:100%;box-sizing:border-box;padding:0 16px 0 12px}
+        #psd-inpage-head{display:grid;grid-template-columns:46px minmax(0,1fr) 26px;align-items:center;column-gap:12px;height:72px;position:relative}
+        #psd-inpage-spinner,#psd-inpage-check{width:46px;height:46px;flex:0 0 46px;position:relative}
+        #psd-inpage-spinner svg,#psd-inpage-check svg{display:block;width:46px;height:46px}
         #psd-inpage-spinner svg{transform:rotate(-90deg)}
-        #psd-inpage-spinner .psd-ring-bg{fill:none;stroke:#3c4043;stroke-width:3}
-        #psd-inpage-spinner .psd-ring{fill:none;stroke:#8ab4f8;stroke-width:3;stroke-linecap:round;stroke-dasharray:106.8;stroke-dashoffset:106.8;transition:stroke-dashoffset .15s linear}
+        #psd-inpage-spinner .psd-ring-bg{fill:none;stroke:#555b64;stroke-width:3.1}
+        #psd-inpage-spinner .psd-ring{fill:none;stroke:#8ab4f8;stroke-width:3.1;stroke-linecap:round;stroke-dasharray:106.8;stroke-dashoffset:106.8;transition:stroke-dashoffset .15s linear}
         #psd-inpage-check{display:none}
-        #psd-inpage-check svg{display:block;width:40px;height:40px}
+        #psd-inpage-check svg{display:block;width:48px;height:48px}
         #psd-inpage-check circle{fill:none;stroke:#34a853;stroke-width:3}
         #psd-inpage-check path{fill:none;stroke:#34a853;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
-        #psd-inpage-title{font-size:16px;line-height:20px;white-space:nowrap;font-weight:500;color:#e8eaed;letter-spacing:.05px}
-        #psd-inpage-detail{margin-top:4px;font-size:13px;color:#9aa0a6;line-height:18px;min-height:18px}
-        #psd-inpage-actions{display:flex;align-items:center;justify-content:flex-end;width:98px;height:40px;margin:0;align-self:center}
-        #psd-inpage-toggle{width:98px;height:40px;border:1px solid #5f6368;border-radius:4px;padding:0;background:transparent;color:#8ab4f8;cursor:pointer;font:500 13px Arial,sans-serif}
-        #psd-inpage-toggle:hover{background:#303134}
-        #psd-inpage-toggle:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
-        #psd-inpage-close{display:none;position:static;grid-column:3;width:28px;height:28px;border:0;border-radius:50%;background:transparent;color:#9aa0a6;font:22px/28px Arial,sans-serif;cursor:pointer;padding:0}
-        #psd-inpage-close:hover{background:#303134;color:#e8eaed}
+        #psd-inpage-title{font-size:16px;line-height:20px;white-space:nowrap;font-weight:400;color:#e8eaed;letter-spacing:0}
+        #psd-inpage-detail{margin-top:1px;font-size:13px;color:#aeb4bd;line-height:18px;min-height:18px}
+        #psd-inpage-actions{display:none}
+        #psd-inpage-toggle{display:none}
+        #psd-inpage-close{display:block;position:static;grid-column:3;width:26px;height:26px;border:0;border-radius:50%;background:transparent;color:#aeb4bd;font:24px/24px Arial,sans-serif;font-weight:300;cursor:pointer;padding:0;text-align:center}
+        #psd-inpage-close:hover{color:#e8eaed;background:rgba(255,255,255,.05)}
         #psd-inpage-close:focus-visible{outline:2px solid #8ab4f8;outline-offset:1px}
         #psd-inpage-overlay.completed #psd-inpage-spinner{display:none}
         #psd-inpage-overlay.completed #psd-inpage-check{display:block}
-        #psd-inpage-overlay.completed #psd-inpage-close{display:block}
-        #psd-inpage-overlay.completed #psd-inpage-toggle{display:none}
-        #psd-inpage-overlay.completed #psd-inpage-head{grid-template-columns:40px minmax(0,1fr) 28px;min-height:40px}
         #psd-inpage-overlay.completed #psd-inpage-detail{display:none}
-        #psd-inpage-overlay.completed #psd-inpage-body{padding-right:20px}
-        #psd-inpage-overlay.cancelled #psd-inpage-card{width:auto;min-width:190px}
-        #psd-inpage-overlay.cancelled #psd-inpage-body{padding:16px 18px}
-        #psd-inpage-overlay.cancelled #psd-inpage-head{min-height:0}
-        #psd-inpage-overlay.cancelled #psd-inpage-spinner,
-        #psd-inpage-overlay.cancelled #psd-inpage-actions{display:none}
-        #psd-inpage-overlay.cancelled #psd-inpage-title{font-size:14px}
-        #psd-inpage-overlay.cancelled #psd-inpage-detail{display:none}
+        #psd-inpage-overlay.completed #psd-inpage-head{grid-template-columns:48px minmax(0,1fr) 28px}
+        #psd-inpage-overlay.cancelled #psd-inpage-title{font-size:16px;line-height:20px;white-space:nowrap}
       </style>
       <div id="psd-inpage-card">
         <div id="psd-inpage-body">
@@ -493,7 +480,6 @@
               <div id="psd-inpage-title">Preparing download</div>
               <div id="psd-inpage-detail"></div>
             </div>
-            <div id="psd-inpage-actions"><button id="psd-inpage-toggle">Cancel</button></div>
             <button id="psd-inpage-close" aria-label="Close">×</button>
           </div>
         </div>
@@ -502,28 +488,26 @@
     (document.body || document.documentElement).appendChild(root);
     root.style.display = "none";
 
-    root.querySelector("#psd-inpage-toggle").onclick = () => {
-      if (!running) return;
-      stopRequested = true;
-      root.classList.add("cancelled");
-      root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
-      setTimeout(() => showInPageOverlay(false), 800);
+    root.querySelector("#psd-inpage-close").onclick = () => {
+      if (running) {
+        if (stopRequested) return;
+        stopRequested = true;
+        root.classList.remove("completed", "unsupported", "cancelled");
+        const title = root.querySelector("#psd-inpage-title");
+        const detail = root.querySelector("#psd-inpage-detail");
+        if (title) title.textContent = "Cancelling download";
+        if (detail) detail.textContent = "";
+        return;
+      }
+      showInPageOverlay(false);
     };
-    root.querySelector("#psd-inpage-close").onclick = () => showInPageOverlay(false);
   }
 
   function updateWindowControl() {
     const root = document.getElementById("psd-inpage-overlay");
     if (!root) return;
-    const button = root.querySelector("#psd-inpage-toggle");
     if (running) {
       root.classList.remove("idle", "cancelled");
-      button.style.display = "inline-block";
-      button.disabled = false;
-      button.textContent = "Cancel";
-    } else {
-      button.style.display = "none";
-      button.disabled = true;
     }
   }
 
@@ -541,10 +525,8 @@
         root.classList.remove("cancelled", "completed", "unsupported");
         const spinner = root.querySelector("#psd-inpage-spinner");
         const check = root.querySelector("#psd-inpage-check");
-        const actions = root.querySelector("#psd-inpage-actions");
         if (spinner) spinner.style.display = "block";
         if (check) check.style.display = "none";
-        if (actions) actions.style.display = "block";
       }
       updateWindowControl();
     }
@@ -578,8 +560,6 @@
   function updateInPageState() {
     const root = document.getElementById("psd-inpage-overlay");
     if (!root) return;
-    const button = root.querySelector("#psd-inpage-toggle");
-    button.classList.toggle("stop", running);
     updateWindowControl();
   }
 
@@ -647,39 +627,17 @@
   }
 
   async function goToPage(pageNumber) {
-    const target = String(pageNumber);
+    const info = getPageInput();
+    if (!info) return false;
+    const input = info.input;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-
-    // Drive can replace the page-number input while the viewer is rendering.
-    // Re-find it for each attempt and verify that the viewer actually accepted
-    // the requested page before continuing.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const info = getPageInput();
-      if (!info) {
-        await sleep(120);
-        continue;
-      }
-
-      const input = info.input;
-      try { input.focus(); } catch (_) {}
-      if (setter) setter.call(input, target); else input.value = target;
-      input.dispatchEvent(new Event('input', {bubbles: true}));
-      input.dispatchEvent(new Event('change', {bubbles: true}));
-      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-      input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-
-      const deadline = Date.now() + Math.max(500, scrollDelay + 500);
-      while (Date.now() < deadline) {
-        const current = getPageInput();
-        if (current?.current === pageNumber) {
-          await sleep(scrollDelay);
-          return true;
-        }
-        await sleep(80);
-      }
-    }
-
-    return false;
+    if (setter) setter.call(input, String(pageNumber)); else input.value = String(pageNumber);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+    await sleep(scrollDelay);
+    return true;
   }
 
   function getScrollableElements() {
@@ -825,20 +783,8 @@
     // Restore the Drive viewer to page 1 after the capture pass finishes.
     // Keep the dim layer active while navigating back so the return is not distracting.
     if (pageInfo && totalHint && !stopRequested) {
-      let returnedToFirstPage = false;
-      for (let attempt = 0; attempt < 4 && !stopRequested; attempt++) {
-        if (await goToPage(1)) {
-          const firstPageImage = await waitForCurrentPageImage(1, 1800);
-          const current = getPageInput();
-          if (current?.current === 1 && firstPageImage) {
-            returnedToFirstPage = true;
-            break;
-          }
-        }
-        await sleep(180);
-      }
-      if (!returnedToFirstPage) log("⚠ Could not reliably return the Drive viewer to page 1.");
-      else log("✓ Drive viewer returned to page 1.");
+      await goToPage(1);
+      await waitForCurrentPageImage(1, 1200);
     }
 
     showScrollDim(false);
