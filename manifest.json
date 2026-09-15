@@ -1,1 +1,61 @@
-{"manifest_version":3,"name":"GDrive View-Only PDF & Video Downloader","version":"1.46.1","description":"Downloads view-only Google Drive PDFs and videos using the rendered PDF pages and captured Google Drive media streams.","permissions":["activeTab","downloads","scripting","storage","tabs","webRequest","offscreen"],"host_permissions":["<all_urls>"],"action":{"default_title":"GDrive PDF & Video Downloader","default_icon":{"16":"icons/icon16.png","48":"icons/icon48.png","128":"icons/icon128.png"}},"content_scripts":[{"matches":["https://drive.google.com/*","https://*.drive.google.com/*","https://*.googleusercontent.com/*","https://classroom.google.com/*","https://*.classroom.google.com/*"],"js":["video-overlay.js","content.js"],"run_at":"document_idle","all_frames":true}],"background":{"service_worker":"background.js"},"content_security_policy":{"extension_pages":"script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"},"web_accessible_resources":[{"resources":["vendor/*"],"matches":["https://drive.google.com/*","https://*.drive.google.com/*","<all_urls>"]}]}
+{
+  "manifest_version": 3,
+  "name": "GDrive View-Only PDF & Video Downloader",
+  "version": "1.46.1",
+  "description": "Downloads view-only Google Drive PDFs and videos using the rendered PDF pages and captured Google Drive media streams.",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "GDrive PDF & Video Downloader",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://drive.google.com/*",
+        "https://*.drive.google.com/*",
+        "https://*.googleusercontent.com/*",
+        "https://classroom.google.com/*",
+        "https://*.classroom.google.com/*"
+      ],
+      "js": [
+        "video-overlay.js",
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/*"
+      ],
+      "matches": [
+        "https://drive.google.com/*",
+        "https://*.drive.google.com/*",
+        "<all_urls>"
+      ]
+    }
+  ]
+}
