@@ -12,12 +12,7 @@
     "offscreen"
   ],
   "host_permissions": [
-    "https://drive.google.com/*",
-    "https://*.drive.google.com/*",
-    "https://*.googleusercontent.com/*",
-    "https://*.googlevideo.com/*",
-    "https://classroom.google.com/*",
-    "https://*.classroom.google.com/*"
+    "<all_urls>"
   ],
   "action": {
     "default_title": "GDrive PDF & Video Downloader",

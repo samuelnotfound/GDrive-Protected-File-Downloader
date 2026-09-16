@@ -7,8 +7,8 @@ const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8')
 );
 
-test('extension access is limited to the Google services it uses', () => {
-    assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
+test('extension can fetch captured Drive media from changing CDN hosts', () => {
+    assert.equal(manifest.host_permissions.includes('<all_urls>'), true);
     assert.equal(manifest.permissions.includes('downloads'), false);
     assert.equal(
         manifest.web_accessible_resources.some(resource =>

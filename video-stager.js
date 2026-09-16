@@ -65,10 +65,17 @@ async function fetchToBlob(url, label, jobId, signal, expectedTotal = 0) {
 // legitimately start downloads while the same offscreen document is alive.
 const activeJobs = new Map();
 // Offscreen runtime message handling
-chrome.runtime.onMessage.addListener(message => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.target === 'video-offscreen' && message.type === 'videoStageStart') {
         const jobId = message.jobId;
-        if (!jobId || activeJobs.has(jobId)) return;
+        if (!jobId) {
+            sendResponse({ accepted: false, error: 'A staging job id is required.' });
+            return;
+        }
+        if (activeJobs.has(jobId)) {
+            sendResponse({ accepted: true });
+            return;
+        }
         const state = {
             cancelled: false,
             videoController: null,
@@ -76,13 +83,17 @@ chrome.runtime.onMessage.addListener(message => {
             worker: null
         };
         activeJobs.set(jobId, state);
+        sendResponse({ accepted: true });
         runStagingJob(jobId, state)
             .catch(error => finishError(jobId, error, state))
             .finally(() => activeJobs.delete(jobId));
     }
     if (message?.target === 'video-offscreen' && message.type === 'videoStageCancelInternal') {
         const state = activeJobs.get(message.jobId);
-        if (!state) return;
+        if (!state) {
+            sendResponse({ accepted: false, error: 'The staging job is no longer active.' });
+            return;
+        }
         state.cancelled = true;
         try {
             state.videoController?.abort();
@@ -96,6 +107,7 @@ chrome.runtime.onMessage.addListener(message => {
             state.worker?.terminate();
         }catch (_) {
         }
+        sendResponse({ accepted: true });
     }
 });
 function isAbortError(error, state) {

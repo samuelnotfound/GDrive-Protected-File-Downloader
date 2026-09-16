@@ -14,13 +14,17 @@ async function logDebug(message, data = null) {
 }
 function cleanURL(url) {
     if (!url) return null;
-    try {
-        const parsedURL = new URL(url);
-        parsedURL.searchParams.delete('range');
-        return parsedURL.toString();
-    }catch (_) {
-        return url;
-    }
+    const hashIndex = url.indexOf('#');
+    const hash = hashIndex === -1 ? '' : url.slice(hashIndex);
+    const withoutHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
+    const queryIndex = withoutHash.indexOf('?');
+    if (queryIndex === -1) return url;
+
+    const base = withoutHash.slice(0, queryIndex);
+    const parameters = withoutHash.slice(queryIndex + 1).split('&');
+    const filtered = parameters.filter(parameter => parameter.split('=', 1)[0] !== 'range');
+    if (filtered.length === parameters.length) return url;
+    return `${base}${filtered.length ? `?${filtered.join('&')}` : ''}${hash}`;
 }
 function sanitizeVideoFilename(name) {
     let value = String(name || '').trim();
@@ -79,7 +83,12 @@ const sendTab = async (tabId, message) => {
     if (!Number.isInteger(tabId)) return;
     try { await chrome.tabs.sendMessage(tabId, message); } catch (_) {}
 };
-const sendOffscreen = message => chrome.runtime.sendMessage({ target: 'video-offscreen', ...message });
+const sendOffscreen = async message => {
+    const response = await chrome.runtime.sendMessage({ target: 'video-offscreen', ...message });
+    if (!response?.accepted) {
+        throw new Error(response?.error || 'The video processor did not acknowledge the request.');
+    }
+};
 const setBadge = text => { try { chrome.action.setBadgeText({ text }); if (text) chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' }); } catch (_) {} };
 // Stream warm-up (speed boost)
 const activeStreamWarmups = new Map();
@@ -97,45 +106,16 @@ const requestStats = {
 function queueStorageMutation(kind, key, mutator) {
     const q = kind === 'jobs' ? 'jobs' : 'streams';
     const task = STORAGE_QUEUE[q].then(async () => {
-        const defaults = {};
-        const value = (await chrome.storage.session.get({ [key]: defaults }))[key] || defaults;
+        const isStreamState = key === 'capturedStreams';
+        const defaults = isStreamState ? emptyStreams() : {};
+        const storageArea = isStreamState ? chrome.storage.local : chrome.storage.session;
+        const value = (await storageArea.get({ [key]: defaults }))[key] || defaults;
         await mutator(value);
-        await chrome.storage.session.set({ [key]: value });
+        await storageArea.set({ [key]: value });
         return value;
     });
     STORAGE_QUEUE[q] = task.catch(error => { requestStats.lastError = error?.message || String(error); });
     return task;
-}
-function isValidTabId(tabId) {
-    return Number.isInteger(tabId) && tabId >= 0;
-}
-async function mutateStoredStreams(tabId, mutator) {
-    if (!isValidTabId(tabId)) return null;
-    return queueStorageMutation('streams', 'capturedStreamsByTab', async streamsByTab => {
-        const key = String(tabId);
-        const streams = {
-            ...emptyStreams(),
-            ...(streamsByTab[key] || {})
-        };
-        streams.audioCandidates = Array.isArray(streams.audioCandidates) ? streams.audioCandidates : [];
-        streams.videoCandidates = Array.isArray(streams.videoCandidates) ? streams.videoCandidates : [];
-        await mutator(streams);
-        streamsByTab[key] = streams;
-
-        const entries = Object.entries(streamsByTab);
-        if (entries.length > 12) {
-            entries
-                .sort(([, a], [, b]) => Number(b?.timestamp) - Number(a?.timestamp))
-                .slice(12)
-                .forEach(([staleKey]) => delete streamsByTab[staleKey]);
-        }
-    });
-}
-async function removeStoredStreams(tabId) {
-    if (!isValidTabId(tabId)) return {};
-    return queueStorageMutation('streams', 'capturedStreamsByTab', streamsByTab => {
-        delete streamsByTab[String(tabId)];
-    });
 }
 async function startStreamWarmup(jobId, label, url, durationMs = 10000) {
     if (!jobId || !url) return;
@@ -205,7 +185,7 @@ function scheduleVideoOffscreenCloseIfIdle(delayMs) {
         }
     }, delayMs);
 }
-async function waitForAudioStream(streams, tabId, timeoutMs = 6000) {
+async function waitForAudioStream(streams, timeoutMs = 6000) {
     if (streams.audio || streams.audioCandidates?.length) {
         return streams;
     }
@@ -213,7 +193,7 @@ async function waitForAudioStream(streams, tabId, timeoutMs = 6000) {
     let current = streams;
     while (Date.now() < deadline) {
         await sleep(200);
-        current = await getStoredStreams(tabId);
+        current = await getStoredStreams();
         if (current.audio || current.audioCandidates?.length) {
             return current;
         }
@@ -264,7 +244,7 @@ async function startVideoDownload(tabId, streams, requestedFilename = "") {
             error: "No video captured. Play the video first."
         };
     }
-    current = await waitForAudioStream(current, tabId);
+    current = await waitForAudioStream(current);
     const audioOriginal = getBestAudioURL(current);
     if (!audioOriginal) {
         return {
@@ -310,17 +290,10 @@ async function startVideoDownload(tabId, streams, requestedFilename = "") {
         };
     }
 }
-async function getStoredStreams(tabId) {
-    if (!isValidTabId(tabId)) return emptyStreams();
-    const { capturedStreamsByTab = {} } = await chrome.storage.session.get({ capturedStreamsByTab: {} });
-    return {
-        ...emptyStreams(),
-        ...(capturedStreamsByTab[String(tabId)] || {})
-    };
-}
+const getStoredStreams = async () => (await chrome.storage.local.get({ capturedStreams: emptyStreams() })).capturedStreams;
 chrome.webRequest.onBeforeRequest.addListener((details) => {
     const url = details.url;
-    if (!url.includes('videoplayback') || !isValidTabId(details.tabId)) return;
+    if (!url.includes('videoplayback')) return;
     requestStats.total += 1;
     const hasMimeVideo = url.includes('mime=video');
     const hasMimeAudio = url.includes('mime=audio');
@@ -329,7 +302,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
         if (hasMimeVideo || isGenericVideo) requestStats.video += 1;
         if (hasMimeAudio) requestStats.audio += 1;
         logDebug('🔎 Network traffic detected:', describeStreamURL(url));
-        mutateStoredStreams(details.tabId, async(currentData) => {
+        queueStorageMutation('streams', 'capturedStreams', async(currentData) => {
             const timestamp = Date.now();
             let updated = false;
             if ((hasMimeVideo || isGenericVideo) && currentData.videoOriginal !== url) {
@@ -364,8 +337,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
                 logDebug('✅ Data saved to storage.');
                 setBadge('ON');
             }
-        }).then(streamsByTab => {
-            const streams = streamsByTab[String(details.tabId)] || emptyStreams();
+        }).then(streams => {
             return sendTab(details.tabId, {
                 type: 'videoStreamState',
                 playbackStarted: streams.playbackStarted,
@@ -376,12 +348,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
         });
     }
 }, {
-    urls: [
-        'https://drive.google.com/*',
-        'https://*.drive.google.com/*',
-        'https://*.googleusercontent.com/*',
-        'https://*.googlevideo.com/*'
-    ]
+    urls: ['<all_urls>']
 });
 async function playVideoInAllFrames(tabId) {
     if (!Number.isInteger(tabId) || tabId < 0) {
@@ -545,20 +512,20 @@ async function handleRuntimeMessage(request, sender) {
 
     if (action === 'clearVideoStream' || action === 'clearStreams') {
         if (action === 'clearStreams') logDebug('🧹 Clearing streams...');
-        const streamsByTab = await removeStoredStreams(senderTabId);
-        setBadge(Object.values(streamsByTab).some(streams => streams?.video) ? 'ON' : '');
+        setBadge('');
+        await chrome.storage.local.set({ capturedStreams: emptyStreams() });
         await sendTab(senderTabId, { type: 'videoStreamState', playbackStarted: false, hasVideo: false });
         return { success: true };
     }
 
     if (action === 'updateFilename') {
         logDebug('📝 Filename update request:', request.filename);
-        await mutateStoredStreams(senderTabId, data => { data.filename = request.filename; });
+        await queueStorageMutation('streams', 'capturedStreams', data => { data.filename = request.filename; });
         return { success: true };
     }
 
     if (action === 'videoPlaybackStarted') {
-        await mutateStoredStreams(senderTabId, data => {
+        await queueStorageMutation('streams', 'capturedStreams', data => {
             data.playbackStarted = true;
             data.timestamp = Date.now();
         });
@@ -568,13 +535,13 @@ async function handleRuntimeMessage(request, sender) {
     }
 
     if (action === 'getStreams') {
-        return { streams: await getStoredStreams(senderTabId) };
+        return { streams: await getStoredStreams() };
     }
 
     if (action === 'downloadVideo') {
         logDebug('⬇️ Received request to download VIDEO');
-        const tabId = isValidTabId(request.tabId) ? request.tabId : senderTabId;
-        const streams = await getStoredStreams(tabId);
+        const tabId = Number.isInteger(request.tabId) ? request.tabId : senderTabId;
+        const streams = await getStoredStreams();
         return startVideoDownload(tabId, streams, request.filename || streams.filename || '');
     }
 
@@ -590,7 +557,7 @@ async function handleRuntimeMessage(request, sender) {
         if (job?.sourceTabId != null) await sendTab(job.sourceTabId, { type: request.type, ...request });
 
         if (request.type === 'videoStageCancel') {
-            void sendOffscreen({ type: 'videoStageCancelInternal', jobId: request.jobId }).catch(() => {});
+            await sendOffscreen({ type: 'videoStageCancelInternal', jobId: request.jobId });
             stopStreamWarmups(request.jobId);
             if (job?.sourceTabId != null) await sendTab(job.sourceTabId, { type: 'videoStageCancelled', jobId: request.jobId });
             await removeVideoStageJob(request.jobId);
@@ -607,7 +574,7 @@ async function handleRuntimeMessage(request, sender) {
     }
 
     if (action === 'ping') {
-        const streams = await getStoredStreams(senderTabId);
+        const streams = await getStoredStreams();
 
         return {
             success: true,
@@ -622,7 +589,7 @@ async function handleRuntimeMessage(request, sender) {
     }
 
     if (action === 'getDiagnostics') {
-        const streams = await getStoredStreams(senderTabId);
+        const streams = await getStoredStreams();
         const diagnostics = {
             serviceWorkerStartTime: SERVICE_WORKER_START,
             lastActivity: streams.timestamp || Date.now(),
@@ -642,6 +609,7 @@ async function handleRuntimeMessage(request, sender) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request?.target === 'video-offscreen') return false;
     handleRuntimeMessage(request, sender)
         .then(sendResponse)
         .catch(error => {
@@ -652,10 +620,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
 
     return true;
-});
-chrome.tabs.onRemoved.addListener(tabId => {
-    removeStoredStreams(tabId).catch(error => {
-        requestStats.lastError = error?.message || String(error);
-    });
 });
 console.log('[GDrive SW] Service Worker Initialized');

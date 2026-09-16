@@ -40,10 +40,17 @@ test('cancelling one staging job does not cancel another', () => {
         return new Promise(() => {});
     };
 
-    runtimeListener({ target: 'video-offscreen', type: 'videoStageStart', jobId: 'first' });
-    runtimeListener({ target: 'video-offscreen', type: 'videoStageStart', jobId: 'second' });
-    runtimeListener({ target: 'video-offscreen', type: 'videoStageCancelInternal', jobId: 'first' });
+    const responses = [];
+    const respond = response => responses.push(response);
+    runtimeListener({ target: 'video-offscreen', type: 'videoStageStart', jobId: 'first' }, {}, respond);
+    runtimeListener({ target: 'video-offscreen', type: 'videoStageStart', jobId: 'second' }, {}, respond);
+    runtimeListener({ target: 'video-offscreen', type: 'videoStageCancelInternal', jobId: 'first' }, {}, respond);
 
     assert.equal(states.get('first').cancelled, true);
     assert.equal(states.get('second').cancelled, false);
+    assert.deepEqual(JSON.parse(JSON.stringify(responses)), [
+        { accepted: true },
+        { accepted: true },
+        { accepted: true }
+    ]);
 });

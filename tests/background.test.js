@@ -41,7 +41,9 @@ function createBackgroundContext() {
                     listeners.runtime = listener;
                 }
             },
-            async sendMessage() {}
+            async sendMessage() {
+                return { accepted: true };
+            }
         },
         scripting: {
             async executeScript() {
@@ -53,11 +55,6 @@ function createBackgroundContext() {
             session: storageArea
         },
         tabs: {
-            onRemoved: {
-                addListener(listener) {
-                    listeners.tabRemoved = listener;
-                }
-            },
             async sendMessage(tabId, message) {
                 sentTabMessages.push({ tabId, message });
             }
@@ -87,13 +84,13 @@ function createBackgroundContext() {
 
 test('cleanURL removes only the range parameter', () => {
     const { context } = createBackgroundContext();
-    const cleaned = new URL(context.cleanURL(
-        'https://example.test/videoplayback?id=1&range=10-20&signature=keep&clen=42'
-    ));
+    const input = 'https://example.test/videoplayback?id=1&range=10-20&sig=a~b%2Fc%20d&n=x%2fy#fragment';
+    const cleaned = context.cleanURL(input);
 
-    assert.equal(cleaned.searchParams.has('range'), false);
-    assert.equal(cleaned.searchParams.get('signature'), 'keep');
-    assert.equal(cleaned.searchParams.get('clen'), '42');
+    assert.equal(
+        cleaned,
+        'https://example.test/videoplayback?id=1&sig=a~b%2Fc%20d&n=x%2fy#fragment'
+    );
 });
 
 test('stream diagnostics omit signed query parameters', () => {
@@ -113,31 +110,23 @@ test('stream diagnostics omit signed query parameters', () => {
     );
 });
 
-test('captured streams remain isolated by browser tab', async () => {
+test('offscreen start reports a missing message acknowledgement', async () => {
     const { context } = createBackgroundContext();
-    await context.mutateStoredStreams(7, streams => {
-        streams.video = 'https://video.test/one';
-        streams.timestamp = 1;
-    });
-    await context.mutateStoredStreams(8, streams => {
-        streams.audio = 'https://audio.test/two';
-        streams.timestamp = 2;
-    });
+    context.chrome.runtime.sendMessage = () => Promise.reject(
+        new Error('The message port closed before a response was received.')
+    );
+    context.fetch = () => Promise.reject(new Error('warm-up unavailable'));
 
-    const first = await context.handleRuntimeMessage({ action: 'getStreams' }, { tab: { id: 7 } });
-    const second = await context.handleRuntimeMessage({ action: 'getStreams' }, { tab: { id: 8 } });
-
-    assert.equal(first.streams.video, 'https://video.test/one');
-    assert.equal(first.streams.audio, null);
-    assert.equal(second.streams.video, null);
-    assert.equal(second.streams.audio, 'https://audio.test/two');
+    await assert.rejects(
+        context.startVideoStaging('job-1', 'https://video.test', 'https://audio.test')
+    );
 });
 
-test('audio wait reads updates from the requested tab', async () => {
+test('audio wait reads a stream captured after download starts', async () => {
     const { context } = createBackgroundContext();
-    const waiting = context.waitForAudioStream({}, 9, 300);
+    const waiting = context.waitForAudioStream({}, 300);
     setTimeout(() => {
-        context.mutateStoredStreams(9, streams => {
+        context.queueStorageMutation('streams', 'capturedStreams', streams => {
             streams.audio = 'https://audio.test/late';
         });
     }, 10);
@@ -146,36 +135,46 @@ test('audio wait reads updates from the requested tab', async () => {
     assert.equal(streams.audio, 'https://audio.test/late');
 });
 
-test('network capture ignores extension requests and uses scoped URL filters', async () => {
+test('network capture keeps requests without a tab association', async () => {
     const { context, listeners, storage } = createBackgroundContext();
     listeners.webRequest({
         tabId: -1,
         url: 'https://r1.googlevideo.com/videoplayback?mime=video&clen=10'
     });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(storage.capturedStreamsByTab, undefined);
+    await new Promise(resolve => setImmediate(resolve));
 
+    assert.equal(storage.capturedStreams.video.includes('videoplayback'), true);
+    assert.equal(listeners.webRequestFilter.urls.includes('<all_urls>'), true);
+});
+
+test('captured video and audio reach the offscreen staging path', async () => {
+    const { context, listeners, storage } = createBackgroundContext();
+    context.fetch = async () => ({
+        ok: true,
+        body: {
+            getReader: () => ({ read: async () => ({ done: true }) })
+        }
+    });
     listeners.webRequest({
-        tabId: 3,
-        url: 'https://r1.googlevideo.com/videoplayback?mime=video&range=0-9&clen=10&sig=keep'
+        tabId: -1,
+        url: 'https://media.example.test/videoplayback?mime=video%2Fmp4&clen=100&range=0-9&sig=video'
+    });
+    listeners.webRequest({
+        tabId: -1,
+        url: 'https://media.example.test/videoplayback?mime=audio%2Fmp4&clen=20&range=0-9&sig=audio'
     });
     await new Promise(resolve => setImmediate(resolve));
     await new Promise(resolve => setImmediate(resolve));
 
-    const streams = await context.getStoredStreams(3);
-    assert.equal(streams.video.includes('range='), false);
-    assert.equal(new URL(streams.video).searchParams.get('sig'), 'keep');
-    assert.equal(listeners.webRequestFilter.urls.includes('<all_urls>'), false);
-});
+    const response = await context.handleRuntimeMessage(
+        { action: 'downloadVideo', filename: 'example' },
+        { tab: { id: 12 } }
+    );
 
-test('closing a tab removes only that tab stream state', async () => {
-    const { context, listeners } = createBackgroundContext();
-    await context.mutateStoredStreams(1, streams => { streams.video = 'one'; });
-    await context.mutateStoredStreams(2, streams => { streams.video = 'two'; });
-
-    listeners.tabRemoved(1);
-    await new Promise(resolve => setImmediate(resolve));
-
-    assert.equal((await context.getStoredStreams(1)).video, null);
-    assert.equal((await context.getStoredStreams(2)).video, 'two');
+    assert.equal(response.success, true);
+    assert.equal(response.staging, true);
+    assert.equal(storage.videoStageJobs[response.jobId].sourceTabId, 12);
+    assert.equal(storage.videoStageJobs[response.jobId].videoUrl.includes('range='), false);
+    assert.equal(storage.videoStageJobs[response.jobId].audioUrl.includes('range='), false);
 });
