@@ -1,7 +1,6 @@
 (() => {
-    if (window.__PSD_LOADED) return;
+if (window.__PSD_LOADED) return;
     window.__PSD_LOADED = true;
-    // PDF capture timing and image thresholds.
     const PREFIX = "blob:https://drive.google.com/";
     const MIN_W = 500;
     const MIN_H = 300;
@@ -23,32 +22,36 @@
     const capturedPages = new Map();
     let orderCounter = 0;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    function send(type, data = {
-    }) {
-        const message = {
-            type, ...data
-        };
+    const sendAction = (action, data = {}) => {
+        try {
+            chrome.runtime.sendMessage({ action, ...data });
+        } catch (_) {}
+    };
+
+    const muteVideo = video => {
+        try {
+            video.muted = video.defaultMuted = true;
+            video.volume = 0;
+        } catch (_) {}
+    };
+
+    function postExtensionMessage(type, data = {}) {
+        const message = { type, ...data };
         try {
             chrome.runtime.sendMessage(message);
-        }catch (_) {
-        }
+        } catch (_) {}
+
         try {
             activePort?.postMessage(message);
-        }catch (_) {
-        }
+        } catch (_) {}
         window.dispatchEvent(new CustomEvent("pdfslide:update", {
             detail: message
         }));
     }
-    function isClassroomPage() {
-        return location.hostname === "classroom.google.com" || location.hostname.endsWith(".classroom.google.com");
-    }
-    function isDrivePage() {
-        return(location.hostname === "drive.google.com" || location.hostname.endsWith(".drive.google.com")) && (location.pathname === "/file" || location.pathname.startsWith("/file/"));
-    }
-    // -------------------------------------------------------------------------
+    const hostIs = name => location.hostname === name || location.hostname.endsWith(`.${name}`);
+    const isClassroomPage = () => hostIs("classroom.google.com");
+    const isDrivePage = () => hostIs("drive.google.com") && (/^\/file(?:\/|$)/).test(location.pathname);
     // Video detection and menu integration
-    // -------------------------------------------------------------------------
     const PROTECTED_DOWNLOAD_MENU_ID = "psd-protected-download-menuitem";
     const PROTECTED_VIDEO_MENU_ID = "psd-protected-video-menuitem";
     let videoStreamDetected = false;
@@ -58,9 +61,7 @@
     let videoDownloadInProgress = false;
     let lastVideoViewerState = false;
     let lastVideoFilenameSent = '';
-    function looksLikeVideoName(value = "") {
-        return /\.(mp4|mkv|avi|mov|webm|flv|m4v|3gp)(?:$|[?#])/i.test(value);
-    }
+
     function isVideoViewerOpen() {
         const viewer = document.querySelector('div[role="dialog"][aria-label="Showing viewer."]');
         const player = document.querySelector('section[aria-label="Video Player"]');
@@ -98,36 +99,8 @@
         const name = getCurrentDriveFileName();
         if (!name || name === lastVideoFilenameSent) return name;
         lastVideoFilenameSent = name;
-        try {
-            chrome.runtime.sendMessage({
-                action: 'updateFilename', filename: name
-            });
-        }catch (_) {
-        }
+        sendAction("updateFilename", { filename: name });
         return name;
-    }
-    function isLikelyVideoFile() {
-        if (isVideoViewerOpen()) return true;
-        const json = document.querySelector('#drive-active-item-info');
-        if (json) {
-            try {
-                const data = JSON.parse(json.textContent || '');
-                if (/^video\//i.test(data?.mimeType || data?.mime_type || '')) return true;
-                if (looksLikeVideoName(data?.title || '')) return true;
-            }catch (_) {
-            }
-        }
-        const elements = document.querySelectorAll(
-            '[aria-label],[data-tooltip],[data-item-title]'
-        );
-        return [...elements]
-            .slice(0, 500)
-            .some(el => looksLikeVideoName(
-                el.getAttribute('aria-label') ||
-                el.getAttribute('data-tooltip') ||
-                el.getAttribute('data-item-title') ||
-                ''
-            ));
     }
     function normalizeMenuText(value = "") {
         return String(value).replace(/\s+/g, " ").trim();
@@ -245,12 +218,7 @@
         videoPlaybackStarted = true;
         updateVideoMenuState();
         if (persist) {
-            try {
-                chrome.runtime.sendMessage({
-                    action: 'videoPlaybackStarted'
-                });
-            }catch (_) {
-            }
+            sendAction("videoPlaybackStarted");
         }
     }
     function installVideoPlaybackDetection() {
@@ -339,27 +307,6 @@
             }
         }, true);
     }
-    function getCurrentPlayingCandidate() {
-        const videos = collectVideoElements();
-        const visible = videos.filter(isVisibleVideoElement);
-        if (!visible.length) return null;
-        return visible.sort((a, b) => {
-            const ap = (!a.paused && !a.ended)  ? 1: 0;
-            const bp = (!b.paused && !b.ended)  ? 1: 0;
-            if (ap !== bp) return bp - ap;
-            return(b.getBoundingClientRect?.().width || 0) * (b.getBoundingClientRect?.().height || 0) - (a.getBoundingClientRect?.().width || 0) * (a.getBoundingClientRect?.().height || 0);
-        })[0];
-    }
-    function muteVideos(videos) {
-        for (const video of videos) {
-            try {
-                video.muted = true;
-                video.defaultMuted = true;
-                video.volume = 0;
-            } catch (_) {
-            }
-        }
-    }
 
     async function tryDirectVideoPlayback(videos) {
         for (const video of videos) {
@@ -367,10 +314,8 @@
                 const before = Number(video.currentTime || 0);
                 const playPromise = video.play();
                 if (playPromise?.then) await playPromise;
-
                 await sleep(250);
-                muteVideos([video]);
-
+                muteVideo(video);
                 if (!video.paused && !video.ended) {
                     videoPlaybackStarted = true;
                     try {
@@ -379,7 +324,6 @@
                         });
                     } catch (_) {
                     }
-
                     return {
                         success: true,
                         direct: true,
@@ -395,10 +339,8 @@
                 );
             }
         }
-
         return null;
     }
-
     async function requestFrameVideoPlayback() {
         try {
             return await new Promise(resolve => {
@@ -412,7 +354,6 @@
                             });
                             return;
                         }
-
                         resolve(response || {
                             success: false,
                             error: "Could not start the Drive video."
@@ -427,14 +368,11 @@
             };
         }
     }
-
     async function startCurrentVideoAndWait() {
         let videos = [];
-
         try {
             videos = collectVideoElements();
-            muteVideos(videos);
-
+            videos.forEach(muteVideo);
             const directResult = await tryDirectVideoPlayback(videos);
             if (directResult) return directResult;
         } catch (error) {
@@ -443,10 +381,8 @@
                 error?.message || error
             );
         }
-
         const result = await requestFrameVideoPlayback();
         await sleep(1500);
-
         if (!result?.success) {
             return {
                 success: false,
@@ -454,20 +390,12 @@
                     "The video did not start playing, so no download was started."
             };
         }
-
         try {
-            muteVideos(collectVideoElements());
+            collectVideoElements().forEach(muteVideo);
         } catch (_) {
         }
-
         videoPlaybackStarted = true;
-        try {
-            chrome.runtime.sendMessage({
-                action: "videoPlaybackStarted"
-            });
-        } catch (_) {
-        }
-
+        sendAction("videoPlaybackStarted");
         return {
             success: true
         };
@@ -555,9 +483,6 @@
         }catch (_) {
         }
     }
-    // -------------------------------------------------------------------------
-    // Google Drive menu UI
-    // -------------------------------------------------------------------------
     const DOWNLOAD_ICON = [
         '<span class="notranslate aqdrmf-rymPhb-Abojl aqdrmf-rymPhb-H09UMb-bN97Pc" aria-hidden="true">',
         '<svg height="24" viewBox="0 96 960 960" width="24">',
@@ -589,43 +514,23 @@
             activate(event);
         });
     }
-    function addVideoMenuDescription(item) {
-        const label = item.querySelector(".psd-video-menu-label");
-        if (!label || item.querySelector(".psd-video-menu-info")) return;
-
-        const labelParent = label.parentElement;
-        if (!labelParent) return;
-
-        const info = document.createElement("span");
-        info.className = "psd-video-menu-info";
-        info.textContent =
-            "This option uses an alternative method to download the video when the usual download option is unavailable.";
-        info.style.cssText =
-            "display:block;box-sizing:border-box;width:100%;max-width:100%;" +
-            "margin-top:2px;font:400 11px/14px Roboto,Arial,sans-serif;" +
-            "color:rgba(255,255,255,.62);white-space:normal;" +
-            "overflow-wrap:anywhere;word-break:normal;overflow:hidden;";
-
-        labelParent.appendChild(info);
-        labelParent.style.display = "flex";
-        labelParent.style.flexDirection = "column";
-        labelParent.style.alignItems = "flex-start";
-        labelParent.style.flex = "1 1 0";
-        labelParent.style.width = "0";
-        labelParent.style.minWidth = "0";
-        labelParent.style.maxWidth = "100%";
-        labelParent.style.overflow = "hidden";
+    function addMenuDescription(item, labelClass, infoClass, text) {
+        const label = item.querySelector('[jsname="K4r5Ff"]');
+        if (!label || item.querySelector(`.${infoClass}`)) return;
+        label.classList.add(labelClass);
+        const parent = label.parentElement;
+        if (!parent) return;
+        const info = Object.assign(document.createElement("span"), { className: infoClass, textContent: text });
+        info.style.cssText = "display:block;box-sizing:border-box;width:100%;max-width:100%;margin-top:2px;font:400 11px/14px Roboto,Arial,sans-serif;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;";
+        parent.append(info);
+        Object.assign(parent.style, { display:"flex", flexDirection:"column", alignItems:"flex-start", flex:"1 1 0", width:"0", minWidth:"0", maxWidth:"100%", overflow:"hidden" });
     }
-
     function addProtectedVideoMenuItem(menu) {
         if (menu.querySelector(`#${PROTECTED_VIDEO_MENU_ID}`)) return true;
-
         const securityRow = findMenuRow(menu, "Security limitations");
         if (!securityRow) return false;
-
         const printRow = findMenuRow(menu, "Print");
         if (printRow) return false;
-
         const templateRow =
             findMenuRow(menu, "Details") ||
             findMenuRow(menu, "Add to starred") ||
@@ -635,9 +540,9 @@
             PROTECTED_VIDEO_MENU_ID,
             "Download Video"
         );
-
         if (!item) return false;
 
+        // Detach the cloned Drive row from its original action/disabled state.
         item.removeAttribute("jsaction");
         item.removeAttribute("aria-disabled");
         item.removeAttribute("disabled");
@@ -659,62 +564,26 @@
                 }
             }
         }
-
-        const shortcut = item.querySelector('[jsname="orbTae"]');
-        if (shortcut) shortcut.textContent = "";
-
-        addVideoMenuDescription(item);
+        addMenuDescription(item, "psd-video-menu-label", "psd-video-menu-info", "This option uses an alternative method to download the video when the usual download option is unavailable.");
         setDownloadMenuItemIcon(item);
         styleDownloadMenuItem(item, "1");
-
         handleMenuKeyboardActivation(item, event => {
             event.preventDefault();
             event.stopPropagation();
             item.click();
         });
-
         const parent = securityRow.parentNode;
         const shareRow = findShareRow(menu);
         insertAfterReference(parent, item, shareRow || null);
         queryVideoStream();
         return true;
     }
-
-    function addProtectedPDFMenuDescription(item) {
-        const label = item.querySelector('[jsname="K4r5Ff"]');
-        if (!label || item.querySelector(".psd-pdf-menu-info")) return;
-
-        label.classList.add("psd-pdf-menu-label");
-        const labelParent = label.parentElement;
-        if (!labelParent) return;
-
-        const info = document.createElement("span");
-        info.className = "psd-pdf-menu-info";
-        info.textContent =
-            "Standard downloads are disabled for this file. This option captures each page and combines them into a downloadable PDF.";
-        info.style.cssText =
-            "display:block;box-sizing:border-box;width:100%;max-width:100%;" +
-            "margin-top:2px;font:400 11px/14px Roboto,Arial,sans-serif;" +
-            "color:rgba(255,255,255,.62);white-space:normal;" +
-            "overflow-wrap:anywhere;word-break:normal;overflow:hidden;";
-
-        labelParent.appendChild(info);
-        labelParent.style.display = "flex";
-        labelParent.style.flexDirection = "column";
-        labelParent.style.alignItems = "flex-start";
-        labelParent.style.flex = "1 1 0";
-        labelParent.style.width = "0";
-        labelParent.style.minWidth = "0";
-        labelParent.style.maxWidth = "100%";
-        labelParent.style.overflow = "hidden";
-    }
-
+    const addProtectedPDFMenuDescription = item => addMenuDescription(item, "psd-pdf-menu-label", "psd-pdf-menu-info", "Standard downloads are disabled for this file. This option captures each page and combines them into a downloadable PDF.");
     function activateProtectedPDFDownload(event) {
         event.preventDefault();
         event.stopPropagation();
         closeDriveFileMenu();
         showInPageOverlay(true);
-
         const root = document.getElementById("psd-inpage-overlay");
         root?.classList.remove("quiet", "idle", "completed", "cancelled");
         root?.querySelector("#psd-inpage-title")?.replaceChildren(
@@ -723,18 +592,14 @@
         root?.querySelector("#psd-inpage-detail")?.replaceChildren(
             document.createTextNode("")
         );
-
-        setTimeout(() => start(), 0);
+        setTimeout(() => startPDFDownload(), 0);
     }
-
     function addProtectedDownloadMenuItem() {
         if (!isDrivePage() || !document.body) return;
-
         const visibleMenus = getVisibleFileMenus();
         for (const menu of visibleMenus) {
             const videoSecurityRow = findMenuRow(menu, "Security limitations");
             const videoPrintRow = findMenuRow(menu, "Print");
-
             if (videoSecurityRow && !videoPrintRow) {
                 const hasNativeDownload = !!findMenuRow(menu, "Download");
                 if (!hasNativeDownload) {
@@ -743,12 +608,10 @@
                 queryVideoStream();
                 continue;
             }
-
             // For PDFs, use the actual Download menu item as the source of truth.
             // Do not use Print or Security limitations to decide whether to inject.
             if (!isLikelyPDFForMenu()) continue;
             if (menu.querySelector(`#${PROTECTED_DOWNLOAD_MENU_ID}`)) continue;
-
             const nativeDownload = findMenuRow(menu, "Download");
             const nativeDisabled = !!nativeDownload && (
                 nativeDownload.getAttribute("aria-disabled") === "true" ||
@@ -756,31 +619,25 @@
                 nativeDownload.dataset.disabled === "true" ||
                 nativeDownload.classList.contains("disabled")
             );
-
             if (nativeDownload && !nativeDisabled) continue;
-
             const templateRow =
                 findMenuRow(menu, "Details") ||
                 findMenuRow(menu, "Add to starred") ||
                 findMenuRow(menu, "Security limitations") ||
                 nativeDownload;
             if (!templateRow) continue;
-
             const item = makeStandaloneMenuRow(
                 templateRow,
                 PROTECTED_DOWNLOAD_MENU_ID,
                 "Download"
             );
             if (!item) continue;
-
             item.setAttribute("aria-label", "Download");
             setDownloadMenuItemIcon(item);
             styleDownloadMenuItem(item);
             addProtectedPDFMenuDescription(item);
-
             item.addEventListener("click", activateProtectedPDFDownload);
             handleMenuKeyboardActivation(item, activateProtectedPDFDownload);
-
             const shareRow = findShareRow(menu);
             insertAfterReference(menu, item, shareRow || null);
         }
@@ -793,12 +650,7 @@
             if (!target || String(target.tagName || '').toLowerCase() !== 'video') return;
             if (!isVisibleVideoElement(target)) return;
             videoPlaybackStarted = true;
-            try {
-                chrome.runtime.sendMessage({
-                    action: 'videoPlaybackStarted'
-                });
-            }catch (_) {
-            }
+            sendAction("videoPlaybackStarted");
         };
         document.addEventListener('play', relay, true);
         document.addEventListener('playing', relay, true);
@@ -822,59 +674,45 @@
         try {
             const playerOpen = isVideoViewerOpen();
             const menus = getVisibleFileMenus();
-
             if (playerOpen !== lastVideoViewerState) {
                 if (playerOpen && !lastVideoViewerState) {
                     videoStreamDetected = false;
                     videoPlaybackStarted = false;
                     updateVideoMenuState();
-
-                    try {
-                        chrome.runtime.sendMessage({
-                            action: "clearVideoStream"
-                        });
-                    } catch (_) {
-                    }
-
+                    sendAction("clearVideoStream");
                     updateCapturedVideoFilename();
                 }
-
                 if (playerOpen) {
                     updateCapturedVideoFilename();
                 }
-
                 lastVideoViewerState = playerOpen;
             }
-
             addProtectedDownloadMenuItem();
         } catch (error) {
             console.debug("[GDrive Downloader] menu scan error", error);
         }
     }
-
     function watchDriveMenus() {
         if (!isDrivePage()) return;
-
         installFileButtonDetection();
         installVideoMenuClickGuard();
         installStreamStorageListener();
         installVideoPlaybackDetection();
-
         scanDriveMenus();
-
-        const observer = new MutationObserver(scanDriveMenus);
+        let scanTimer = null;
+        const scheduleScan = () => {
+            if (scanTimer) return;
+            scanTimer = setTimeout(() => { scanTimer = null; scanDriveMenus(); }, 100);
+        };
+        const observer = new MutationObserver(scheduleScan);
         observer.observe(document.documentElement || document.body, {
             childList: true,
             subtree: true,
             attributes: true,
             attributeFilter: ["style", "class", "aria-hidden"]
         });
-
-        setInterval(scanDriveMenus, 500);
+        setInterval(scheduleScan, 1000);
     }
-    // -------------------------------------------------------------------------
-    // File type detection
-    // -------------------------------------------------------------------------
     function isLikelyPDFForMenu() {
         if (isVideoViewerOpen()) return false;
         const text = [document.title || "", document.body?.innerText || ""].join(" ");
@@ -892,20 +730,7 @@
     function looksLikePDFName(value = "") {
         return /\.pdf(?:$|[?#])/i.test(value) || /\bpdf\b/i.test(value) && /\.pdf\b/i.test(value);
     }
-    function findClassroomPdfDriveUrl() {
-        if (!isClassroomPage()) return null;
-        const candidates = [...document.querySelectorAll("a[href], [data-url], [href]")];
-        for (const el of candidates) {
-            const href = el.href || el.getAttribute("href") || el.getAttribute("data-url") || "";
-            if (!/drive\.google\.com/i.test(href)) continue;
-            const label = [el.textContent || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || "", href].join(" ");
-            if (looksLikePDFName(label)) return href;
-        }
-        const bodyText = document.body?.innerText || "";
-        if (!looksLikePDFName(document.title) && !looksLikePDFName(bodyText)) return null;
-        const driveLink = [...document.querySelectorAll("a[href]")].map(a => a.href).find(href => /drive\.google\.com\/(?:file\/d\/|open\?id=)/i.test(href));
-        return driveLink || null;
-    }
+
     function currentDriveFileIsPDF() {
         if (!location.hostname.endsWith("drive.google.com")) return false;
         const title = document.title || "";
@@ -919,32 +744,7 @@
         if (hasPageCounter && allImages().length > 0) return true;
         return false;
     }
-    async function maybeOpenClassroomPDF() {
-        if (!isClassroomPage()) return false;
-        const driveUrl = findClassroomPdfDriveUrl();
-        if (!driveUrl) return false;
-        try {
-            await chrome.storage.session.set({
-                psdAutoStart: true
-            });
-        }catch (_) {
-            try {
-                await chrome.storage.local.set({
-                    psdAutoStart: true
-                });
-            }catch (_) {
-            }
-        }
-        running = true;
-        send("state", {
-            running: true, ready: false
-        });
-        send("info", {
-            status: "Opening PDF…", detail: "Opening the Classroom PDF in Google Drive."
-        });
-        location.href = driveUrl;
-        return true;
-    }
+
     async function consumeAutoStart() {
         let pending = false;
         try {
@@ -965,9 +765,6 @@
         }
         return pending;
     }
-    // -------------------------------------------------------------------------
-    // PDF page capture
-    // -------------------------------------------------------------------------
     function allImages() {
         return[...document.images].filter(img => {
             const src = img.currentSrc || img.src || "";
@@ -992,10 +789,6 @@
     }
     let pageInputCache = null;
     let pageInputCacheAt = 0;
-    function invalidatePageInputCache() {
-        pageInputCache = null;
-        pageInputCacheAt = 0;
-    }
     function getCurrentPageImage() {
         const vw = window.innerWidth || document.documentElement.clientWidth || 1;
         const vh = window.innerHeight || document.documentElement.clientHeight || 1;
@@ -1106,9 +899,6 @@
         }
         return null;
     }
-    // -------------------------------------------------------------------------
-    // In-page progress UI
-    // -------------------------------------------------------------------------
     function resetProgressUI() {
         const root = document.getElementById("psd-inpage-overlay");
         if (!root) return;
@@ -1342,40 +1132,31 @@
       </div>`;
         return root;
     }
-
     function bindInPageOverlayEvents(root) {
         const cancelButton = root.querySelector("#psd-inpage-toggle");
         const closeButton = root.querySelector("#psd-inpage-close");
-
         cancelButton.onclick = () => {
             if (!running) return;
-
             stopRequested = true;
             const title = root.querySelector("#psd-inpage-title");
             if (title) title.textContent = "Cancelling download";
         };
-
         closeButton.onclick = () => {
             if (!running) {
                 showInPageOverlay(false);
                 return;
             }
-
             if (stopRequested) return;
-
             stopRequested = true;
             root.classList.remove("completed", "unsupported", "cancelled");
-
             const title = root.querySelector("#psd-inpage-title");
             const detail = root.querySelector("#psd-inpage-detail");
             if (title) title.textContent = "Cancelling download";
             if (detail) detail.textContent = "";
         };
     }
-
     function createInPageOverlay() {
         if (document.getElementById("psd-scroll-dim")) return;
-
         const dim = document.createElement("div");
         dim.id = "psd-scroll-dim";
         dim.setAttribute("aria-hidden", "true");
@@ -1383,9 +1164,7 @@
             "position:fixed;inset:0;z-index:2147483645;" +
             "background:rgba(0,0,0,.80);pointer-events:auto;display:none;";
         (document.body || document.documentElement).appendChild(dim);
-
         if (document.getElementById("psd-inpage-overlay")) return;
-
         const root = createInPageOverlayRoot();
         (document.body || document.documentElement).appendChild(root);
         root.style.display = "none";
@@ -1427,7 +1206,7 @@
         }
         if (detailEl && !root.classList.contains("cancelled")) {
             const text = String(detail || "");
-            if (/^Processing page\b/i.test(text)) detailEl.textContent = text;
+            if (/^(?:Processing page|OCR page)\b/i.test(text)) detailEl.textContent = text;
             else if (/^Loading page\b/i.test(text)) detailEl.textContent = text;
             else if (/^Loading pages\b/i.test(text)) detailEl.textContent = text;
             else if (/^Preparing page\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing page/i, "Capturing page");
@@ -1441,20 +1220,19 @@
             if (ring) ring.style.strokeDashoffset = `${106.8 - (106.8 * safePercent / 100)}`;
         }
     }
-    function updateInPageState() {
-        const root = document.getElementById("psd-inpage-overlay");
-        if (!root) return;
-        updateWindowControl();
-    }
-    function log(text) {
-        send("info", {
+    function logProgressEvent(text) {
+        postExtensionMessage("info", {
             log: text
         });
     }
     let unsupportedTimer = null;
-    function updateProgress(status, detail, percent = null, count = null) {
-        send("info", {
-            status, detail, done: count, total: currentTotalHint || count, percent
+    function reportProgress(status, detail, percent = null, count = null) {
+        postExtensionMessage("info", {
+            status,
+            detail,
+            done: count,
+            total: currentTotalHint || count,
+            percent
         });
         updateInPageOverlay(status, detail, percent, count);
     }
@@ -1478,7 +1256,7 @@
             if (spinner) spinner.style.display = "none";
             if (actions) actions.style.display = "none";
         }
-        send("info", {
+        postExtensionMessage("info", {
             status: "File type not supported", detail: "", done: 0, total: 0, percent: 0
         });
         unsupportedTimer = setTimeout(() => {
@@ -1490,10 +1268,10 @@
         }, 2000);
     }
     function setButtons() {
-        send("state", {
+        postExtensionMessage("state", {
             running, ready, completed
         });
-        updateInPageState();
+        updateWindowControl();
     }
     function findPageInput(force = false) {
         const now = performance.now();
@@ -1595,12 +1373,11 @@
         capturedPages.clear();
         currentTotalHint = null;
         orderCounter = 0;
+        imageCache?.clear?.();
     }
-
     function rememberCapturedPage(pageNumber, image) {
         const src = image?.currentSrc || image?.src || "";
         if (!src) return false;
-
         const page = {
             src,
             w: image.naturalWidth,
@@ -1608,176 +1385,141 @@
             order: pageNumber - 1,
             pageNumber
         };
-
         capturedPages.set(pageNumber, page);
-
         if (!pages.has(src)) {
             pages.set(src, {
                 ...page,
                 order: orderCounter++
             });
         }
-
         return true;
     }
-
     async function capturePagesByNumber(pageInfo, totalHint) {
         if (!pageInfo || !totalHint) return;
-
-        updateProgress("Preparing…", `Checking first page / ${totalHint}`, 0, 0);
+        reportProgress("Preparing…", `Checking first page / ${totalHint}`, 0, 0);
         await goToPage(1);
-
         const firstImage = await waitForFirstPageReady();
         if (firstImage) {
             rememberCapturedPage(1, firstImage);
-            log(`✓ First page verified and captured — 1/${totalHint}`);
+            logProgressEvent(`✓ First page verified and captured — 1/${totalHint}`);
         } else {
-            log("⚠ First page did not finish rendering during preflight; it will be retried in recovery.");
+            logProgressEvent("⚠ First page did not finish rendering during preflight; it will be retried in recovery.");
         }
-
-        log("✓ Starting single-pass capture…");
-
+        logProgressEvent("✓ Starting single-pass capture…");
         for (let pageNumber = 2; pageNumber <= totalHint && !stopRequested; pageNumber++) {
             await capturePageWithRetry(pageNumber, totalHint);
         }
     }
-
     async function capturePageWithRetry(pageNumber, totalHint) {
         const previousImage = getCurrentPageImage();
         const previousSrc = previousImage?.currentSrc || previousImage?.src || "";
         let captured = false;
-
         for (let attempt = 0; attempt < 2 && !stopRequested && !captured; attempt++) {
-            updateProgress(
+            reportProgress(
                 "Preparing…",
                 `Capturing page ${pageNumber} / ${totalHint}`,
                 Math.floor((pageNumber - 1) / totalHint * 50),
                 capturedPages.size
             );
-
             const navigated = await goToPage(pageNumber);
             if (!navigated) {
-                log(`⚠ Could not navigate to page ${pageNumber} (attempt ${attempt + 1}/2)`);
+                logProgressEvent(`⚠ Could not navigate to page ${pageNumber} (attempt ${attempt + 1}/2)`);
                 continue;
             }
-
             const timeout = attempt === 0 ? IMAGE_WAIT_FAST : IMAGE_WAIT_RECOVERY;
             const image = await waitForCurrentPageImage(pageNumber, previousSrc, timeout);
             if (!image) continue;
-
             const src = image.currentSrc || image.src || "";
             if (!src || image.naturalWidth < MIN_W || image.naturalHeight < MIN_H) {
                 continue;
             }
-
             captured = rememberCapturedPage(pageNumber, image);
         }
-
         if (!captured) {
-            log(`⚠ Could not resolve the rendered image for page ${pageNumber}`);
+            logProgressEvent(`⚠ Could not resolve the rendered image for page ${pageNumber}`);
         }
-
         const percent = Math.floor(pageNumber / totalHint * 50);
-        updateProgress(
+        reportProgress(
             "Preparing…",
             `Capturing page ${pageNumber} / ${totalHint}`,
             percent,
             capturedPages.size
         );
-
         if (pageNumber % 10 === 0 || pageNumber === totalHint) {
-            log(
+            logProgressEvent(
                 `✓ Page ${pageNumber}/${totalHint} — ` +
                 `${capturedPages.size}/${totalHint} pages captured`
             );
         }
     }
-
     async function capturePagesByScrolling(totalHint) {
-        log("Page-number control not found. Using automatic scrolling fallback…");
-
+        logProgressEvent("Page-number control not found. Using automatic scrolling fallback…");
         let roots = getScrollableElements(true);
-
         for (let step = 0; step < 3000 && !stopRequested; step++) {
             if (step % 12 === 0) {
                 roots = getScrollableElements(true);
             }
-
             let atBottom = roots.length > 0;
             for (const root of roots.slice(0, 4)) {
                 atBottom = atBottom &&
                     root.scrollTop >= root.scrollHeight - root.clientHeight - 10;
             }
-
             const pagesBeforeScroll = pages.size;
             const moved = scrollViewerStep(roots);
-
             await sleep(scrollDelay);
             scanRenderedPages();
-
             const percent = totalHint
                 ? Math.min(
                     50,
                     Math.floor(Math.min(pages.size, totalHint) / totalHint * 50)
                 )
                 : Math.min(50, Math.floor(step / 1000 * 50));
-
-            updateProgress(
+            reportProgress(
                 "Preparing…",
                 `Capturing ${pages.size}${totalHint ? " / " + totalHint : ""}`,
                 percent,
                 pages.size
             );
-
             if (pages.size > pagesBeforeScroll) {
-                log(
+                logProgressEvent(
                     `✓ ${pages.size}${totalHint ? "/" + totalHint : ""} page images found`
                 );
             }
-
             if ((!moved || atBottom) && pages.size === pagesBeforeScroll) {
                 await sleep(150);
                 scanRenderedPages();
-
                 if (pages.size === pagesBeforeScroll) {
                     break;
                 }
             }
         }
     }
-
     async function recoverMissingPages(totalHint) {
         if (!totalHint || capturedPages.size >= totalHint) return;
-
         const missingPages = [];
         for (let pageNumber = 1; pageNumber <= totalHint; pageNumber++) {
             if (!capturedPages.has(pageNumber)) {
                 missingPages.push(pageNumber);
             }
         }
-
-        log(`⚠ ${missingPages.length} pages not yet captured. Running recovery check…`);
-
+        logProgressEvent(`⚠ ${missingPages.length} pages not yet captured. Running recovery check…`);
         for (let index = 0; index < missingPages.length && !stopRequested; index++) {
             const pageNumber = missingPages[index];
             const previousImage = getCurrentPageImage();
             const previousSrc = previousImage?.currentSrc || previousImage?.src || "";
-
             await goToPage(pageNumber);
             const image = await waitForCurrentPageImage(
                 pageNumber,
                 previousSrc,
                 IMAGE_WAIT_RECOVERY
             );
-
             if (image) {
                 rememberCapturedPage(pageNumber, image);
             }
-
             const progress = 50 + Math.floor(
                 (index + 1) / Math.max(1, missingPages.length) * 25
             );
-            updateProgress(
+            reportProgress(
                 "Preparing…",
                 `Capturing page ${pageNumber} / ${totalHint}`,
                 progress,
@@ -1785,25 +1527,20 @@
             );
         }
     }
-
     function finishCancelledCapture() {
         showScrollDim(false);
         running = false;
         setButtons();
-
         const root = document.getElementById("psd-inpage-overlay");
         if (root) {
             root.classList.add("cancelled");
             root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
             setTimeout(() => showInPageOverlay(false), 800);
         }
-
-        log("Preload stopped.");
+        logProgressEvent("Preload stopped.");
     }
-
-    async function preload() {
+    async function preparePDFCapture() {
         if (running || !isDrivePage()) return;
-
         if (!currentDriveFileIsPDF()) {
             running = false;
             ready = false;
@@ -1811,52 +1548,40 @@
             showUnsupportedFile();
             return;
         }
-
         running = true;
         stopRequested = false;
         ready = false;
         resetCaptureState();
         resetProgressUI();
-
         const overlay = document.getElementById("psd-inpage-overlay");
         overlay?.classList.remove("minimized");
-
         setButtons();
         showScrollDim(true);
-        updateProgress("Preparing…", "Reading page count…", 0, 0);
-
+        reportProgress("Preparing…", "Reading page count…", 0, 0);
         const pageInfo = await waitForPageInfo();
         const totalHint = pageInfo?.max || getPageCountHint();
         currentTotalHint = totalHint;
-        log(`Detected page count: ${totalHint || "unknown"}`);
-
+        logProgressEvent(`Detected page count: ${totalHint || "unknown"}`);
         if (pageInfo && totalHint) {
             await capturePagesByNumber(pageInfo, totalHint);
         } else {
             await capturePagesByScrolling(totalHint);
         }
-
         if (stopRequested) {
             finishCancelledCapture();
             return;
         }
-
         await recoverMissingPages(totalHint);
-
         if (pageInfo && totalHint && !stopRequested) {
             await goToPage(1);
             await waitForCurrentPageImage(1, "", IMAGE_WAIT_FAST);
         }
-
         showScrollDim(false);
-
         const total = totalHint || capturedPages.size || pages.size;
         ready = capturedPages.size > 0 &&
             (!totalHint || capturedPages.size >= totalHint);
-
         running = false;
         setButtons();
-
         const detail = ready
             ? `${capturedPages.size} / ${total} page images captured`
             : `${capturedPages.size} / ${total || "?"} page images captured. Try Start again.`;
@@ -1866,33 +1591,27 @@
                 99,
                 Math.floor(capturedPages.size / Math.max(1, total) * 100)
             );
-
-        updateProgress(
+        reportProgress(
             ready ? "Ready to process PDF" : "Some pages were not captured",
             detail,
             percent,
             capturedPages.size
         );
-
-        log(
+        logProgressEvent(
             ready
                 ? "✓ Capture complete — all pages captured. Starting OCR/PDF processing…"
                 : "⚠ Capture ended before all pages were captured."
         );
-
         if (ready && !stopRequested) {
             await generatePDF();
         }
     }
-    function safeFilename() {
+    function getPDFDownloadFilename() {
         let title = document.querySelector('meta[itemprop="name"]')?.content || document.title || "download.pdf";
         title = title.replace(/\s*-\s*Google Drive\s*$/i, "").trim();
         if (!/\.pdf$/i.test(title)) title += ".pdf";
         return title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
     }
-    // -------------------------------------------------------------------------
-    // OCR and PDF generation
-    // -------------------------------------------------------------------------
     let ocrWorker = null;
     let ocrRequestId = 0;
     const ocrRequests = new Map();
@@ -1939,7 +1658,7 @@
         ocrWorker = null;
     }
     let ocrProgress = 0;
-    async function recognizePage(imageBytes) {
+    async function runOCROnPage(imageBytes) {
         const worker = getOCRWorker();
         ocrProgress = 0;
         const id = ++ ocrRequestId;
@@ -1957,33 +1676,32 @@
             }
         });
     }
-    async function imageToJPEG(page) {
-        let img = [...document.images].find(i => (i.currentSrc || i.src) === page.src);
+    const imageCache = new Map();
+    async function encodePageAsJPEG(page) {
+        let img = imageCache.get(page.src);
         if (!img) {
-            img = new Image();
-            img.src = page.src;
-            await img.decode();
-        }else if (!img.complete) await img.decode();
+            img = [...document.images].find(i => (i.currentSrc || i.src) === page.src);
+            if (!img) {
+                img = new Image();
+                img.src = page.src;
+            }
+            imageCache.set(page.src, img);
+        }
+        if (!img.complete) await img.decode();
+
         const canvas = document.createElement("canvas");
         canvas.width = page.w;
         canvas.height = page.h;
-        const ctx = canvas.getContext("2d", {
-            alpha: false
-        });
-        ctx.drawImage(img, 0, 0, page.w, page.h);
-        const dataURL = canvas.toDataURL("image/jpeg", 0.92);
+        canvas.getContext("2d", { alpha: false }).drawImage(img, 0, 0, page.w, page.h);
+
+        const blob = await new Promise((resolve, reject) =>
+            canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.92)
+        );
         return {
-            dataURL, width: page.w, height: page.h, canvas
+            bytes: new Uint8Array(await blob.arrayBuffer()),
+            width: page.w,
+            height: page.h
         };
-    }
-    function dataURLBytes(dataURL) {
-        const b64 = dataURL.split(",")[1];
-        const bin = atob(b64);
-        const out = new Uint8Array(bin.length);
-        for (let i = 0;
-        i < bin.length;
-        i++) out[i] = bin.charCodeAt(i);
-        return out;
     }
     function pdfEscapeText(text) {
         return String(text).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)").replace(/[\r\n]+/g, " ");
@@ -2061,169 +1779,135 @@
             }
         };
     }
-    function getPagesForPDF() {
-        if (capturedPages.size) {
-            return [...capturedPages.values()].sort(
-                (a, b) => a.pageNumber - b.pageNumber
-            );
-        }
-
-        return [...pages.values()].sort((a, b) => a.order - b.order);
-    }
-
-    async function processPDFPage(writer, page, index, total) {
-        updateProgress(
-            "Preparing…",
-            `Processing page ${index + 1} / ${total}`,
-            50 + Math.floor(index / total * 48),
-            index
+    function getOrderedCapturedPages() {
+        return [...(capturedPages.size ? capturedPages : pages).values()].sort((a, b) =>
+            (a.pageNumber ?? a.order) - (b.pageNumber ?? b.order)
         );
-
-        const jpeg = await imageToJPEG(page);
+    }
+    async function convertPageToPDF(writer, page, index, total) {
+        const jpeg = await encodePageAsJPEG(page);
         let words = [];
 
         if (enableOCR) {
-            updateProgress(
+            reportProgress(
                 "Preparing…",
                 `OCR page ${index + 1} / ${total}`,
-                50 + Math.floor((index + 0.35) / total * 48),
+                50 + Math.floor(((index + 0.35) / total) * 48),
                 index
             );
 
             try {
-                words = await recognizePage(dataURLBytes(jpeg.dataURL));
+                words = await runOCROnPage(jpeg.bytes.slice());
             } catch (ocrError) {
-                log(
-                    `⚠ OCR unavailable (${ocrError.message}). Continuing without OCR.`
-                );
+                logProgressEvent(`⚠ OCR unavailable (${ocrError.message}). Continuing without OCR.`);
             }
+        } else {
+            reportProgress(
+                "Preparing…",
+                `Processing page ${index + 1} / ${total}`,
+                50 + Math.floor((index / total) * 48),
+                index
+            );
         }
 
         writer.addPage(index, {
             width: jpeg.width,
             height: jpeg.height,
-            bytes: dataURLBytes(jpeg.dataURL),
+            bytes: jpeg.bytes,
             words
         });
     }
-
     function showPDFCancelledState() {
         const root = document.getElementById("psd-inpage-overlay");
         if (!root) return;
-
         root.classList.add("cancelled");
         root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
         setTimeout(() => showInPageOverlay(false), 800);
     }
-
     async function finishPDFDownload(writer, converted) {
-        updateProgress("Preparing…", "Finalizing the PDF file", 99, converted);
-        await sleep(50);
+        reportProgress("Preparing…", "Finalizing the PDF file", 99, converted);
         await shutdownOCRWorker();
-
         const blob = writer.finish();
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
-
         link.href = url;
-        link.download = safeFilename();
+        link.download = getPDFDownloadFilename();
         document.body.appendChild(link);
         link.click();
         link.remove();
-
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-
         running = false;
         completed = false;
         ready = false;
         resetCaptureState();
         setButtons();
-        updateProgress("File downloaded", "", 100, converted);
-
+        reportProgress("File downloaded", "", 100, converted);
         const doneRoot = document.getElementById("psd-inpage-overlay");
         if (doneRoot) {
             doneRoot.classList.remove("cancelled", "unsupported");
             doneRoot.classList.add("completed");
-
             const doneSpinner = doneRoot.querySelector("#psd-inpage-spinner");
             const doneCheck = doneRoot.querySelector("#psd-inpage-check");
             const doneActions = doneRoot.querySelector("#psd-inpage-actions");
             const doneTitle = doneRoot.querySelector("#psd-inpage-title");
             const doneDetail = doneRoot.querySelector("#psd-inpage-detail");
-
             if (doneSpinner) doneSpinner.style.display = "none";
             if (doneCheck) doneCheck.style.display = "block";
             if (doneActions) doneActions.style.display = "none";
             if (doneTitle) doneTitle.textContent = "File downloaded";
             if (doneDetail) doneDetail.textContent = "";
         }
-
         updateWindowControl();
-        log(`✓ Downloaded ${safeFilename()}`);
+        logProgressEvent(`✓ Downloaded ${getPDFDownloadFilename()}`);
     }
-
     async function generatePDF() {
         if (running || (!capturedPages.size && !pages.size)) return;
-
         running = true;
         stopRequested = false;
-
         const overlay = document.getElementById("psd-inpage-overlay");
         if (overlay) {
             overlay.classList.remove("quiet", "idle");
         }
-
         setButtons();
-
-        const orderedPages = getPagesForPDF();
+        const orderedPages = getOrderedCapturedPages();
         const total = orderedPages.length;
         const writer = makePDFWriter(total);
-
-        updateProgress("Preparing…", `Processing page 0 / ${total}`, 50, 0);
-        log(`Generating ${total}-page PDF…`);
-
+        reportProgress("Preparing…", `${enableOCR ? "OCR" : "Processing"} page 1 / ${total}`, 50, 0);
+        logProgressEvent(`Generating ${total}-page PDF…`);
         let converted = 0;
-
         for (let index = 0; index < orderedPages.length; index++) {
             if (stopRequested) break;
-
             try {
-                await processPDFPage(writer, orderedPages[index], index, total);
+                await convertPageToPDF(writer, orderedPages[index], index, total);
                 converted++;
-
                 if ((index + 1) % 5 === 0 || index === orderedPages.length - 1) {
-                    log(`✓ Processed ${index + 1}/${total}`);
+                    logProgressEvent(`✓ Processed ${index + 1}/${total}`);
                 }
-
-                await sleep(0);
+                if ((index + 1) % 5 === 0) await sleep(0);
             } catch (error) {
-                log(`✕ Page ${index + 1}: ${error.message}`);
+                logProgressEvent(`✕ Page ${index + 1}: ${error.message}`);
             }
         }
-
         if (stopRequested || converted !== total) {
             running = false;
             setButtons();
-
             if (stopRequested) {
                 showPDFCancelledState();
                 await shutdownOCRWorker();
-                log("PDF generation stopped.");
+                logProgressEvent("PDF generation stopped.");
             } else {
-                updateProgress(
+                reportProgress(
                     "PDF incomplete",
                     `${converted} of ${total} pages were converted. No download was made.`,
                     0,
                     converted
                 );
             }
-
             return;
         }
-
         await finishPDFDownload(writer, converted);
     }
-    async function start(options = {}) {
+async function startPDFDownload(options = {}) {
         if (running) return;
         if (Object.prototype.hasOwnProperty.call(options, "enableOCR")) {
             enableOCR = !!options.enableOCR;
@@ -2239,9 +1923,9 @@
         }
         completed = false;
         resetProgressUI();
-        await preload();
+        await preparePDFCapture();
     }
-    function handleCommand(msg) {
+    function handlePDFCommand(msg) {
         if (msg.type === "init") {
             setButtons();
             if (!isDrivePage()) {
@@ -2251,30 +1935,28 @@
             }else if (!currentDriveFileIsPDF()) {
                 showUnsupportedFile();
             }else {
-                updateProgress("Ready", "", ready  ? 100: null, ready  ? 0: 0);
+                reportProgress("Ready", "", ready  ? 100: null, ready  ? 0: 0);
             }
         }
-        if (msg.type === "start") start();
+        if (msg.type === "start") startPDFDownload();
         if (msg.type === "stop") stopRequested = true;
         if (msg.type === "openOverlay") {
             showInPageOverlay(true);
-            updateInPageState();
+            updateWindowControl();
         }
     }
-    // -------------------------------------------------------------------------
     // Extension messaging
-    // -------------------------------------------------------------------------
     chrome.runtime.onConnect.addListener(port => {
         if (port.name !== "pdf-downloader") return;
         activePort = port;
-        port.onMessage.addListener(handleCommand);
+        port.onMessage.addListener(handlePDFCommand);
         port.onDisconnect.addListener(() => {
             if (activePort === port) activePort = null;
             // Do not reopen the overlay when the popup/port disconnects.
-            updateInPageState();
+            updateWindowControl();
         });
-        updateInPageState();
-        handleCommand({
+        updateWindowControl();
+        handlePDFCommand({
             type: "init"
         });
     });
@@ -2283,106 +1965,51 @@
     //   Downloading -> Merging -> Processing download -> Download has started -> Video Downloaded
     const videoOverlay = window.GDriveVideoOverlay;
     if (!videoOverlay) throw new Error("Video overlay module failed to load.");
-    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-        if (window.top !== window.self) return;
-        const types = ['videoDownloadState', 'videoStagePreload', 'videoStageStarted', 'videoStageStatus', 'videoStageProgress', 'videoStageMergeProgress', 'videoStageDownloadStarted', 'videoStageFinished', 'videoStageError', 'videoStageCancelled'];
-        if (!types.includes(msg?.type)) return;
-        if (msg.type === 'videoDownloadState') {
-            if (msg.state === 'idle' || msg.state === 'finished' || msg.state === 'error' || msg.state === 'cancelled') {
-                videoDownloadInProgress = false;
-                updateVideoMenuState();
-            }else if (msg.state === 'busy') {
-                videoDownloadInProgress = true;
-                updateVideoMenuState();
-            }
-            return;
+    const videoStageTypes = new Set(["videoDownloadState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
+    const setVideoBusy = busy => { videoDownloadInProgress = busy; updateVideoMenuState(); };
+    chrome.runtime.onMessage.addListener(msg => {
+        if (window.top !== window.self || !videoStageTypes.has(msg?.type)) return;
+        if (msg.type === "videoDownloadState") return setVideoBusy(msg.state === "busy");
+        if (msg.type === "videoStagePreload") {
+            const job = videoOverlay.getJobId(), stage = videoOverlay.getStage();
+            if ((job && job !== msg.jobId && !["ready", "cancelled", "error"].includes(stage)) || (job === msg.jobId && stage !== "download")) return;
+            return videoOverlay.show(true, msg.jobId || null, msg.videoBytes || 0, msg.audioBytes || 0);
         }
-        if (msg.type === 'videoStagePreload') {
-            // Preload is initialization-only. Ignore any duplicate/late preload once
-            // an active job has progressed past Downloading.
-            const currentJob = videoOverlay.getJobId();
-            const currentStage = videoOverlay.getStage();
-            if (currentJob && currentJob !== msg.jobId && !['ready', 'cancelled', 'error'].includes(currentStage)) return;
-            if (currentJob && currentJob === msg.jobId && !['download'].includes(currentStage)) return;
-            videoOverlay.show(true, msg.jobId || null, msg.videoBytes || 0, msg.audioBytes || 0);
-            return;
-        }
-        // Every stage event after preload belongs to exactly one active video job.
-        // Ignore stale/duplicate events from an older staging tab so they can never
-        // repaint the current overlay back to a previous stage.
-        const activeJobId = videoOverlay.getJobId();
-        if (activeJobId && msg.jobId && activeJobId !== msg.jobId) return;
-        if (msg.type === 'videoStageStatus') {
-            if (msg.stage === 'staged' || msg.stage === 'merge') {
-                // Once staging is complete, the UI must stay in the merge phase.
-                videoOverlay.update({
-                    stage: 'merge', progress: msg.stage === 'staged'  ? 0: undefined
-                });
-            }else if (msg.stage === 'processing') {
-                videoOverlay.update({
-                    stage: 'processing'
-                });
-            }
-            return;
-        }
-        if (msg.type === 'videoStageStarted') {
-            // This is an acknowledgement that the staging page started. Do not
-            // call show() here because that would reset a newer Processing/Merge/
-            // Started/Ready state if this message arrives late.
-            videoOverlay.setJob(msg.jobId || videoOverlay.getJobId(), msg.videoBytes || 0, msg.audioBytes || 0);
-            return;
-        }
-        if (msg.type === 'videoStageProgress') {
-            videoOverlay.update({
-                label: msg.label, received: msg.received, total: msg.total
-            });
-            return;
-        }
-        if (msg.type === 'videoStageMergeProgress') {
-            videoOverlay.update({
-                stage: 'merge', progress: msg.progress
-            });
-            return;
-        }
-        if (msg.type === 'videoStageDownloadStarted') {
-            videoOverlay.update({
-                stage: 'started'
-            });
-            return;
-        }
-        if (msg.type === 'videoStageFinished') {
-            videoDownloadInProgress = false;
-            updateVideoMenuState();
-            videoOverlay.update({
-                stage: 'ready'
-            });
-            return;
-        }
-        if (msg.type === 'videoStageError') {
-            videoOverlay.clearJob();
-            videoDownloadInProgress = false;
-            updateVideoMenuState();
-            videoOverlay.update({
-                stage: 'error', message: msg.message || 'Video processing failed.'
-            });
-            return;
-        }
-        if (msg.type === 'videoStageCancelled') {
-            videoOverlay.clearJob();
-            videoDownloadInProgress = false;
-            updateVideoMenuState();
-            videoOverlay.update({
-                stage: 'cancel'
-            });
+        const activeJob = videoOverlay.getJobId();
+        if (activeJob && msg.jobId && activeJob !== msg.jobId) return;
+        switch (msg.type) {
+            case "videoStageStatus":
+                if (msg.stage === "staged" || msg.stage === "merge") videoOverlay.update({ stage: "merge", progress: msg.stage === "staged" ? 0 : undefined });
+                else if (msg.stage === "processing") videoOverlay.update({ stage: "processing" });
+                break;
+            case "videoStageStarted":
+                videoOverlay.setJob(msg.jobId || activeJob, msg.videoBytes || 0, msg.audioBytes || 0);
+                break;
+            case "videoStageProgress":
+                videoOverlay.update({ label: msg.label, received: msg.received, total: msg.total });
+                break;
+            case "videoStageMergeProgress":
+                videoOverlay.update({ stage: "merge", progress: msg.progress });
+                break;
+            case "videoStageDownloadStarted":
+                videoOverlay.update({ stage: "started" });
+                break;
+            case "videoStageFinished":
+                setVideoBusy(false); videoOverlay.update({ stage: "ready" });
+                break;
+            case "videoStageError":
+                videoOverlay.clearJob(); setVideoBusy(false); videoOverlay.update({ stage: "error", message: msg.message || "Video processing failed." });
+                break;
+            case "videoStageCancelled":
+                videoOverlay.clearJob(); setVideoBusy(false); videoOverlay.update({ stage: "cancel" });
+                break;
         }
     });
     chrome.storage.onChanged.addListener((changes, namespace) => {
-        if (namespace === "local" && changes.capturedStreams) {
-            const next = changes.capturedStreams.newValue || {
-            };
-            if (next.playbackStarted) videoPlaybackStarted = true;
-            setVideoDownloadState(!!next.video);
-        }
+        const next = namespace === "local" && changes.capturedStreams?.newValue;
+        if (!next) return;
+        if (next.playbackStarted) videoPlaybackStarted = true;
+        setVideoDownloadState(!!next.video);
     });
     // Keep one consistent in-page controller. It never hides when the extension popup opens.
     // Install this in every content-script frame so Drive's actual player can
@@ -2404,7 +2031,7 @@
         consumeAutoStart().then(pending => {
             if (pending) {
                 const waitForViewer = () => {
-                    if (currentDriveFileIsPDF()) start();
+                    if (currentDriveFileIsPDF()) startPDFDownload();
                     else setTimeout(waitForViewer, 100);
                 };
                 waitForViewer();
