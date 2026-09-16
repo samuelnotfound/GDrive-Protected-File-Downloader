@@ -2,7 +2,6 @@
     const NS = 'GDriveVideoOverlay';
     const CIRCUMFERENCE = 106.81415022205297;
     const DOWNLOAD_WEIGHT = 0.75;
-    // The overlay owns only presentation state. The downloader remains responsible for the job itself.
     const state = {
         jobId: null, stage: 'download', merge: 0, fixedTotals: {
             video: 0, audio: 0
@@ -229,19 +228,15 @@
       </div>`;
         return root;
     }
-
     function bindOverlayEvents(root) {
         const cancelButton = root.querySelector("#psd-video-progress-cancel");
         const closeButton = root.querySelector("#psd-video-progress-close");
-
         cancelButton.addEventListener("click", () => {
             const jobId = state.jobId;
             if (!jobId || cancelButton.disabled) return;
-
             cancelButton.disabled = true;
             state.jobId = null;
             setState("cancelled");
-
             try {
                 chrome.runtime.sendMessage({
                     type: "videoStageCancel",
@@ -250,7 +245,6 @@
             } catch (_) {
                 // The page can disappear while a download is being cancelled.
             }
-
             setTimeout(() => {
                 const currentRoot = document.getElementById(
                     "psd-video-progress-overlay"
@@ -258,24 +252,19 @@
                 if (currentRoot) currentRoot.style.display = "none";
             }, 700);
         });
-
         closeButton.addEventListener("click", () => {
             state.jobId = null;
             root.style.display = "none";
         });
     }
-
     function ensure() {
         if (window.top !== window.self) return null;
-
         let root = document.getElementById("psd-video-progress-overlay");
         if (root) return root;
-
         root = createOverlayRoot();
         (document.body || document.documentElement).appendChild(root);
         root.style.display = "none";
         bindOverlayEvents(root);
-
         return root;
     }
     function combinedTotal() {
@@ -323,12 +312,12 @@
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
         }else if (stage === 'merge') {
-            title.textContent = 'Processing Video';
+            title.textContent = 'Merging video + audio';
             info.textContent = 'Download will begin shortly, please wait.';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
         }else if (stage === 'processing') {
-            title.textContent = 'Processing download';
+            title.textContent = 'Finalizing download';
             info.textContent = 'Please wait..';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
@@ -356,7 +345,7 @@
             root.classList.add('cancelled');
         }else if (stage === 'error') {
             title.textContent = 'Video download failed';
-            info.textContent = '';
+            info.textContent = detail || 'The video could not be downloaded.';
             cancel.style.display = 'none';
             root.classList.add('error');
         }
@@ -383,9 +372,7 @@
             root.style.display = 'none';
             return;
         }
-        const sameJob = !!(jobId && state.jobId && jobId === state.jobId);
-        const activeJob = !!state.jobId && !['ready', 'cancelled', 'error'].includes(state.stage);
-        if (activeJob && (sameJob || !jobId || jobId !== state.jobId)) {
+        if (state.jobId && !['ready', 'cancelled', 'error'].includes(state.stage)) {
             root.style.display = 'block';
             return;
         }
@@ -484,9 +471,7 @@
         }
     }
     window[NS] = {
-        ensure, show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, getTotals: () => ({
-            video: state.bytes.video.total, audio: state.bytes.audio.total
-        }), clearJob: () => {
+        ensure, show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, clearJob: () => {
             state.jobId = null;
         }
     };
