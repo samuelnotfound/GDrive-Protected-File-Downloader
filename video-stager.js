@@ -234,13 +234,6 @@ async function mergeStreams(job, videoBlob, audioBlob) {
     );
     activeWorker = worker;
     try {
-        // Convert once here and transfer the buffers to FFmpeg instead of
-        // structured-cloning large Blob objects into the worker.
-        const [videoBuffer, audioBuffer] = await Promise.all([
-            videoBlob.arrayBuffer(),
-            audioBlob.arrayBuffer()
-        ]);
-
         return await new Promise((resolve, reject) => {
             worker.onmessage = event => {
                 const data = event.data || {};
@@ -282,7 +275,7 @@ async function mergeStreams(job, videoBlob, audioBlob) {
                     return;
                 }
                 if (data.type === "done") {
-                    resolve(new Blob([data.buffer], { type: "video/mp4" }));
+                    resolve(data.blob);
                     return;
                 }
                 if (data.type === "error") {
@@ -294,10 +287,10 @@ async function mergeStreams(job, videoBlob, audioBlob) {
             };
             worker.postMessage({
                 type: "mux",
-                video: videoBuffer,
-                audio: audioBuffer,
+                video: videoBlob,
+                audio: audioBlob,
                 audioCodec: getAudioCodec(job.audioUrl)
-            }, [videoBuffer, audioBuffer]);
+            });
         });
     } finally {
         try {
@@ -307,14 +300,25 @@ async function mergeStreams(job, videoBlob, audioBlob) {
         activeWorker = null;
     }
 }
-async function finishStagedDownload(job, output) {
+async function saveMergedOutput(jobId, blob) {
+    await saveStagedValue(`output:${jobId}`, blob);
+    await deleteStagedValue(`video:${jobId}`);
+    await deleteStagedValue(`audio:${jobId}`);
+    postStageMessage("videoStageStatus", {
+        jobId,
+        stage: "processing"
+    });
+}
+async function finishStagedDownload(job) {
+    const output = await readStagedValue(`output:${job.jobId}`);
     if (!(output instanceof Blob)) {
-        throw new Error("Merged MP4 was not produced.");
+        throw new Error("Merged MP4 was not found in local staging.");
     }
     await triggerDownload(output, job.filename, job.jobId);
     postStageMessage("videoStageFinished", {
         jobId: job.jobId
     });
+    await deleteStagedValue(`output:${job.jobId}`);
 }
 async function runStagingJob(jobId) {
     currentJobId = jobId;
@@ -322,19 +326,12 @@ async function runStagingJob(jobId) {
     const job = await getJob(jobId);
     const [videoBlob, audioBlob] = await downloadSourceStreams(job);
     throwIfCancelled();
-    postStageMessage("videoStageStatus", {
-        jobId,
-        stage: "staged"
-    });
-    throwIfCancelled();
     const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
     throwIfCancelled();
     postStageMessage("videoStageStatus", {
         jobId,
         stage: "processing"
     });
-    await finishStagedDownload({
-        ...job,
-        jobId
-    }, mergedBlob);
+    await triggerDownload(mergedBlob, job.filename, jobId);
+    postStageMessage("videoStageFinished", { jobId });
 }
