@@ -5,7 +5,6 @@
   "description": "Downloads view-only Google Drive PDFs and videos using the rendered PDF pages and captured Google Drive media streams.",
   "permissions": [
     "activeTab",
-    "downloads",
     "scripting",
     "storage",
     "tabs",
@@ -13,7 +12,12 @@
     "offscreen"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://drive.google.com/*",
+    "https://*.drive.google.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.googlevideo.com/*",
+    "https://classroom.google.com/*",
+    "https://*.classroom.google.com/*"
   ],
   "action": {
     "default_title": "GDrive PDF & Video Downloader",
@@ -54,7 +58,9 @@
       "matches": [
         "https://drive.google.com/*",
         "https://*.drive.google.com/*",
-        "<all_urls>"
+        "https://*.googleusercontent.com/*",
+        "https://classroom.google.com/*",
+        "https://*.classroom.google.com/*"
       ]
     }
   ]

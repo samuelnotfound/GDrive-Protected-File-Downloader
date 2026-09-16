@@ -57,7 +57,6 @@ if (window.__PSD_LOADED) return;
     let videoStreamDetected = false;
     let videoPlaybackStarted = false;
     let videoDetectTimer = null;
-    let videoPlaybackListenerInstalled = false;
     let videoDownloadInProgress = false;
     let lastVideoViewerState = false;
     let lastVideoFilenameSent = '';
@@ -214,27 +213,12 @@ if (window.__PSD_LOADED) return;
         return collectVideoElements().some(video => isVisibleVideoElement(video) && !video.paused && !video.ended && (video.currentTime > 0 || video.readyState >= 3));
     }
     function setVideoPlaybackStarted(started = true, persist = true) {
-        if (!started) return;
+        if (!started || videoPlaybackStarted) return;
         videoPlaybackStarted = true;
         updateVideoMenuState();
         if (persist) {
             sendAction("videoPlaybackStarted");
         }
-    }
-    function installVideoPlaybackDetection() {
-        if (videoPlaybackListenerInstalled) return;
-        videoPlaybackListenerInstalled = true;
-        const handlePlayback = event => {
-            const video = event.target;
-            if (!video || String(video.tagName || '').toLowerCase() !== 'video') return;
-            if (!isVisibleVideoElement(video)) return;
-            setVideoPlaybackStarted(true);
-        };
-        document.addEventListener('play', handlePlayback, true);
-        document.addEventListener('playing', handlePlayback, true);
-        setInterval(() => {
-            if (hasMainPagePlaybackStarted()) setVideoPlaybackStarted(true);
-        }, 250);
     }
     function updateVideoMenuState() {
         const items = document.querySelectorAll('#' + PROTECTED_VIDEO_MENU_ID);
@@ -271,9 +255,9 @@ if (window.__PSD_LOADED) return;
     }
     function queryVideoStream() {
         try {
-            chrome.storage.local.get(['capturedStreams'], result => {
-                const streams = result?.capturedStreams || {
-                };
+            chrome.runtime.sendMessage({ action: 'getStreams' }, result => {
+                if (chrome.runtime.lastError) return;
+                const streams = result?.streams || {};
                 if (streams.playbackStarted || streams.video) videoPlaybackStarted = true;
                 setVideoDownloadState(!!streams.video);
             });
@@ -423,16 +407,18 @@ if (window.__PSD_LOADED) return;
                 action: 'downloadVideo', filename: filename || undefined
             }, response => {
                 if (chrome.runtime.lastError) {
+                    videoDownloadInProgress = false;
+                    updateVideoMenuState();
                     videoOverlay.update({
                         stage: 'error', message: chrome.runtime.lastError.message
                     });
                     return;
                 }
-                if (response && !response.success) {
+                if (!response?.success) {
                     videoDownloadInProgress = false;
                     updateVideoMenuState();
                     videoOverlay.update({
-                        stage: 'error', message: response.error || 'Video processing failed.'
+                        stage: 'error', message: response?.error || 'Video processing failed.'
                     });
                     return;
                 }
@@ -468,20 +454,6 @@ if (window.__PSD_LOADED) return;
             const item = e.target?.closest?.('#' + PROTECTED_VIDEO_MENU_ID);
             if (item && item.dataset.activationInProgress !== 'true') activate(item, e);
         }, true);
-    }
-    function installStreamStorageListener() {
-        if (window.__PSD_STREAM_STORAGE_LISTENER) return;
-        window.__PSD_STREAM_STORAGE_LISTENER = true;
-        try {
-            chrome.storage.onChanged.addListener((changes, area) => {
-                if (area !== 'local' || !changes.capturedStreams) return;
-                const next = changes.capturedStreams.newValue || {
-                };
-                if (next.playbackStarted || next.video) videoPlaybackStarted = true;
-                setVideoDownloadState(!!next.video);
-            });
-        }catch (_) {
-        }
     }
     const DOWNLOAD_ICON = [
         '<span class="notranslate aqdrmf-rymPhb-Abojl aqdrmf-rymPhb-H09UMb-bN97Pc" aria-hidden="true">',
@@ -649,26 +621,19 @@ if (window.__PSD_LOADED) return;
             const target = event.target;
             if (!target || String(target.tagName || '').toLowerCase() !== 'video') return;
             if (!isVisibleVideoElement(target)) return;
-            videoPlaybackStarted = true;
-            sendAction("videoPlaybackStarted");
+            setVideoPlaybackStarted(true);
         };
         document.addEventListener('play', relay, true);
         document.addEventListener('playing', relay, true);
         const poll = () => {
             try {
                 if (hasMainPagePlaybackStarted()) {
-                    videoPlaybackStarted = true;
-                    try {
-                        chrome.runtime.sendMessage({
-                            action: 'videoPlaybackStarted'
-                        });
-                    }catch (_) {
-                    }
+                    setVideoPlaybackStarted(true);
                 }
             }catch (_) {
             }
         };
-        setInterval(poll, 250);
+        setInterval(poll, 1000);
     }
     function scanDriveMenus() {
         try {
@@ -696,8 +661,6 @@ if (window.__PSD_LOADED) return;
         if (!isDrivePage()) return;
         installFileButtonDetection();
         installVideoMenuClickGuard();
-        installStreamStorageListener();
-        installVideoPlaybackDetection();
         scanDriveMenus();
         let scanTimer = null;
         const scheduleScan = () => {
@@ -1965,11 +1928,16 @@ async function startPDFDownload(options = {}) {
     //   Downloading -> Merging -> Processing download -> Download has started -> Video Downloaded
     const videoOverlay = window.GDriveVideoOverlay;
     if (!videoOverlay) throw new Error("Video overlay module failed to load.");
-    const videoStageTypes = new Set(["videoDownloadState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
+    const videoStageTypes = new Set(["videoDownloadState", "videoStreamState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
     const setVideoBusy = busy => { videoDownloadInProgress = busy; updateVideoMenuState(); };
     chrome.runtime.onMessage.addListener(msg => {
         if (window.top !== window.self || !videoStageTypes.has(msg?.type)) return;
         if (msg.type === "videoDownloadState") return setVideoBusy(msg.state === "busy");
+        if (msg.type === "videoStreamState") {
+            if (msg.playbackStarted) videoPlaybackStarted = true;
+            if (typeof msg.hasVideo === "boolean") setVideoDownloadState(msg.hasVideo);
+            return;
+        }
         if (msg.type === "videoStagePreload") {
             const job = videoOverlay.getJobId(), stage = videoOverlay.getStage();
             if ((job && job !== msg.jobId && !["ready", "cancelled", "error"].includes(stage)) || (job === msg.jobId && stage !== "download")) return;
@@ -2004,12 +1972,6 @@ async function startPDFDownload(options = {}) {
                 videoOverlay.clearJob(); setVideoBusy(false); videoOverlay.update({ stage: "cancel" });
                 break;
         }
-    });
-    chrome.storage.onChanged.addListener((changes, namespace) => {
-        const next = namespace === "local" && changes.capturedStreams?.newValue;
-        if (!next) return;
-        if (next.playbackStarted) videoPlaybackStarted = true;
-        setVideoDownloadState(!!next.video);
     });
     // Keep one consistent in-page controller. It never hides when the extension popup opens.
     // Install this in every content-script frame so Drive's actual player can

@@ -1,46 +1,3 @@
-const JOB_DB = 'gdrive-video-staging', JOB_STORE = 'jobs';
-function openStagingDatabase() {
-    return new Promise((resolve, reject) => {
-        const req = indexedDB.open(JOB_DB, 1);
-        req.onupgradeneeded = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains(JOB_STORE)) db.createObjectStore(JOB_STORE);
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error || new Error('Could not open local staging storage.'));
-    });
-}
-async function saveStagedValue(key, value) {
-    const db = await openStagingDatabase();
-    await new Promise((resolve, reject) => {
-        const tx = db.transaction(JOB_STORE, 'readwrite');
-        tx.objectStore(JOB_STORE).put(value, key);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error || new Error('Could not save staged data.'));
-    });
-    db.close();
-}
-async function readStagedValue(key) {
-    const db = await openStagingDatabase();
-    const value = await new Promise((resolve, reject) => {
-        const tx = db.transaction(JOB_STORE, 'readonly');
-        const req = tx.objectStore(JOB_STORE).get(key);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error || new Error('Could not read staged job.'));
-    });
-    db.close();
-    return value;
-}
-async function deleteStagedValue(key) {
-    const db = await openStagingDatabase();
-    await new Promise(resolve => {
-        const tx = db.transaction(JOB_STORE, 'readwrite');
-        tx.objectStore(JOB_STORE).delete(key);
-        tx.oncomplete = resolve;
-        tx.onerror = tx.onabort = resolve;
-    });
-    db.close();
-}
 function postStageMessage(type, payload = {
 }) {
     try {
@@ -104,49 +61,52 @@ async function fetchToBlob(url, label, jobId, signal, expectedTotal = 0) {
     });
     return new Blob(chunks);
 }
-// Active staging resources
-// Active staging resources.
-// Keep these at module scope so the runtime message handler can immediately
-// abort the real video/audio downloads or terminate FFmpeg when the user
-// cancels the job.
-let currentJobId = null;
-let cancelled = false;
-let videoController = null;
-let audioController = null;
-let activeWorker = null;
+// Keep each job's cancellable resources separate. Multiple Drive tabs can
+// legitimately start downloads while the same offscreen document is alive.
+const activeJobs = new Map();
 // Offscreen runtime message handling
 chrome.runtime.onMessage.addListener(message => {
     if (message?.target === 'video-offscreen' && message.type === 'videoStageStart') {
-        runStagingJob(message.jobId).catch(error => finishError(message.jobId, error));
+        const jobId = message.jobId;
+        if (!jobId || activeJobs.has(jobId)) return;
+        const state = {
+            cancelled: false,
+            videoController: null,
+            audioController: null,
+            worker: null
+        };
+        activeJobs.set(jobId, state);
+        runStagingJob(jobId, state)
+            .catch(error => finishError(jobId, error, state))
+            .finally(() => activeJobs.delete(jobId));
     }
     if (message?.target === 'video-offscreen' && message.type === 'videoStageCancelInternal') {
-        cancelled = true;
+        const state = activeJobs.get(message.jobId);
+        if (!state) return;
+        state.cancelled = true;
         try {
-            videoController?.abort();
+            state.videoController?.abort();
         }catch (_) {
         }
         try {
-            audioController?.abort();
+            state.audioController?.abort();
         }catch (_) {
         }
         try {
-            activeWorker?.terminate();
+            state.worker?.terminate();
         }catch (_) {
         }
-        videoController = null;
-        audioController = null;
-        activeWorker = null;
     }
 });
-function isAbortError(error) {
-    return cancelled || error?.name === 'AbortError' || /aborted|abort/i.test(String(error?.message || error || ''));
+function isAbortError(error, state) {
+    return state?.cancelled || error?.name === 'AbortError' || /aborted|abort/i.test(String(error?.message || error || ''));
 }
-function finishError(jobId, error) {
+function finishError(jobId, error, state) {
     const payload = {
         jobId,
         message: error?.message || String(error)
     };
-    postStageMessage(isAbortError(error)  ? 'videoStageCancelled': 'videoStageError', payload);
+    postStageMessage(isAbortError(error, state)  ? 'videoStageCancelled': 'videoStageError', payload);
 }
 async function getJob(jobId) {
     return await new Promise((resolve, reject) => {
@@ -174,8 +134,8 @@ async function triggerDownload(blob, filename, jobId) {
     });
     setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
-function throwIfCancelled() {
-    if (!cancelled) return;
+function throwIfCancelled(state) {
+    if (!state.cancelled) return;
     throw Object.assign(new Error("Download cancelled."), {
         name: "AbortError"
     });
@@ -185,34 +145,34 @@ function throwIfCancelled() {
 // This is separate from the short-lived stream warm-up in background.js. The
 // warm-up is only a speed optimization; these fetches are the real downloads
 // whose data is retained and later merged into the final file.
-async function downloadSourceStreams(job) {
+async function downloadSourceStreams(jobId, job, state) {
     postStageMessage("videoStageStatus", {
-        jobId: currentJobId,
+        jobId,
         stage: "download",
         message: "Downloading full video and audio streams…"
     });
-    videoController = new AbortController();
-    audioController = new AbortController();
+    state.videoController = new AbortController();
+    state.audioController = new AbortController();
     try {
         return await Promise.all([
             fetchToBlob(
                 job.videoUrl,
                 "video",
-                currentJobId,
-                videoController.signal,
+                jobId,
+                state.videoController.signal,
                 job.videoBytes || 0
             ),
             fetchToBlob(
                 job.audioUrl,
                 "audio",
-                currentJobId,
-                audioController.signal,
+                jobId,
+                state.audioController.signal,
                 job.audioBytes || 0
             )
         ]);
     } finally {
-        videoController = null;
-        audioController = null;
+        state.videoController = null;
+        state.audioController = null;
     }
 }
 function getAudioCodec(url) {
@@ -228,18 +188,18 @@ function getAudioCodec(url) {
     }
     return "";
 }
-async function mergeStreams(job, videoBlob, audioBlob) {
+async function mergeStreams(jobId, job, videoBlob, audioBlob, state) {
     const worker = new Worker(
         chrome.runtime.getURL("vendor/ffmpeg-mux-worker.js")
     );
-    activeWorker = worker;
+    state.worker = worker;
     try {
         return await new Promise((resolve, reject) => {
             worker.onmessage = event => {
                 const data = event.data || {};
                 if (data.type === "source-progress") {
                     postStageMessage("videoStageProgress", {
-                        jobId: currentJobId,
+                        jobId,
                         label: data.label,
                         received: data.received,
                         total: data.total
@@ -248,7 +208,7 @@ async function mergeStreams(job, videoBlob, audioBlob) {
                 }
                 if (data.type === "status") {
                     postStageMessage("videoStageStatus", {
-                        jobId: currentJobId,
+                        jobId,
                         stage: "merge",
                         message: data.message
                     });
@@ -256,14 +216,14 @@ async function mergeStreams(job, videoBlob, audioBlob) {
                 }
                 if (data.type === "ffmpeg-log") {
                     postStageMessage("videoStageLog", {
-                        jobId: currentJobId,
+                        jobId,
                         message: data.message
                     });
                     return;
                 }
                 if (data.type === "ffmpeg-progress") {
                     postStageMessage("videoStageMergeProgress", {
-                        jobId: currentJobId,
+                        jobId,
                         progress: Math.max(
                             0,
                             Math.min(1, Number(data.progress) || 0)
@@ -297,37 +257,15 @@ async function mergeStreams(job, videoBlob, audioBlob) {
             worker.terminate();
         } catch (_) {
         }
-        activeWorker = null;
+        state.worker = null;
     }
 }
-async function saveMergedOutput(jobId, blob) {
-    await saveStagedValue(`output:${jobId}`, blob);
-    await deleteStagedValue(`video:${jobId}`);
-    await deleteStagedValue(`audio:${jobId}`);
-    postStageMessage("videoStageStatus", {
-        jobId,
-        stage: "processing"
-    });
-}
-async function finishStagedDownload(job) {
-    const output = await readStagedValue(`output:${job.jobId}`);
-    if (!(output instanceof Blob)) {
-        throw new Error("Merged MP4 was not found in local staging.");
-    }
-    await triggerDownload(output, job.filename, job.jobId);
-    postStageMessage("videoStageFinished", {
-        jobId: job.jobId
-    });
-    await deleteStagedValue(`output:${job.jobId}`);
-}
-async function runStagingJob(jobId) {
-    currentJobId = jobId;
-    cancelled = false;
+async function runStagingJob(jobId, state) {
     const job = await getJob(jobId);
-    const [videoBlob, audioBlob] = await downloadSourceStreams(job);
-    throwIfCancelled();
-    const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
-    throwIfCancelled();
+    const [videoBlob, audioBlob] = await downloadSourceStreams(jobId, job, state);
+    throwIfCancelled(state);
+    const mergedBlob = await mergeStreams(jobId, job, videoBlob, audioBlob, state);
+    throwIfCancelled(state);
     postStageMessage("videoStageStatus", {
         jobId,
         stage: "processing"

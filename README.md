@@ -33,6 +33,14 @@ Support for additional file types is currently unplanned.
 5. Select the extracted extension folder.
 6. The extension should now appear in your Chrome extensions list.
 
+## Tests
+
+The regression tests use Node's built-in test runner and require no package installation:
+
+```bash
+node --test tests/*.test.js
+```
+
 ## Usage
 
 ### PDF
