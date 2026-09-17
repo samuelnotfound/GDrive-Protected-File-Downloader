@@ -67,10 +67,11 @@ Support for additional file types is currently unplanned.
 
 ## Credits
 
+- **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference material for the Google Drive video download workflow, including handling separate video and audio streams.
 - **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference material for the Google Drive view-only PDF workflow used by this project.
-- **[mhsohan/How-to-download-protected-view-only-files-from-google-drive-](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)**
+  - **[mhsohan/How-to-download-protected-view-only-files-from-google-drive-](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)**
   - **[zeltox/Google-Drive-PDF-Downloader](https://github.com/zeltox/Google-Drive-PDF-Downloader)**
-  - **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference material for the Google Drive video download workflow, including handling separate video and audio streams.
+
 - **[Tesseract.js](https://github.com/naptha/tesseract.js)** — bundled engine used for client-side OCR.
 - **[FFmpeg WebAssembly](https://www.npmjs.com/package/@ffmpeg/core)** — bundled media processor used to combine separate video and audio streams into a single file.
 
