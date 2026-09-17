@@ -1,3 +1,9 @@
+/**
+ * Background Service Worker
+ * Captures Google Drive media requests, manages stream/job state, runs warm-up requests,
+ * and coordinates the offscreen video download/processing pipeline.
+ */
+
 function cleanURL(url) {
     if (!url) return null;
     const value = String(url);
@@ -188,7 +194,7 @@ async function waitForAudioStream(streams, timeoutMs = 6000) {
 
 let videoOffscreenCreating = null;
 async function ensureVideoOffscreen() {
-    const url = chrome.runtime.getURL('video-stager.html');
+    const url = chrome.runtime.getURL('video-offscreen.html');
     if (chrome.runtime.getContexts) {
         const contexts = await chrome.runtime.getContexts({
             contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [url]
@@ -197,7 +203,7 @@ async function ensureVideoOffscreen() {
     }
     if (!videoOffscreenCreating) {
         videoOffscreenCreating = chrome.offscreen.createDocument({
-            url: 'video-stager.html',
+            url: 'video-offscreen.html',
             reasons: ['BLOBS', 'WORKERS'],
             justification: 'Process and merge captured Google Drive video and audio streams without opening a visible tab.'
         }).finally(() => {

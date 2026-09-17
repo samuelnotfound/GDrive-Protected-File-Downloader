@@ -79,3 +79,11 @@ Support for additional file types is currently unplanned.
 - It does not remove access restrictions, bypass authentication, or grant access to files that the user cannot already view.
 - Do not use this extension to circumvent access controls, permissions, copyright restrictions, or other restrictions imposed by the owner of a file.
 - Please respect the copyright, permissions, privacy, and terms of service associated with any content you access or download.
+
+## Main JavaScript files
+- `ui.js` — Shared page UI, menus, buttons, and the PDF/video download overlay.
+- `pdf-downloader.js` — Protected PDF capture, OCR, PDF generation, and saving.
+- `video-controller.js` — Drive-page video detection, playback, stream state, and download controls.
+- `service-worker.js` — Service worker for stream interception, job state, warm-ups, and offscreen coordination.
+- `video-stream-downloader.js` — Offscreen video/audio source downloading and progress reporting.
+- `video-processor.js` — Offscreen FFmpeg merging, final MP4 creation, and file saving.
