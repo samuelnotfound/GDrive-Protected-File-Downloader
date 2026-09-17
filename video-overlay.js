@@ -345,7 +345,7 @@
             root.classList.add('cancelled');
         }else if (stage === 'error') {
             title.textContent = 'Video download failed';
-            info.textContent = '';
+            info.textContent = detail || 'The video could not be downloaded.';
             cancel.style.display = 'none';
             root.classList.add('error');
         }
@@ -471,9 +471,7 @@
         }
     }
     window[NS] = {
-        ensure, show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, getTotals: () => ({
-            video: state.bytes.video.total, audio: state.bytes.audio.total
-        }), clearJob: () => {
+        ensure, show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, clearJob: () => {
             state.jobId = null;
         }
     };

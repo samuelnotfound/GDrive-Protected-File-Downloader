@@ -24,7 +24,7 @@ if (window.__PSD_LOADED) return;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const sendAction = (action, data = {}) => {
         try {
-            chrome.runtime.sendMessage({ action, ...data });
+            chrome.runtime.sendMessage({ action, ...data }).catch?.(() => {});
         } catch (_) {}
     };
 
@@ -38,7 +38,7 @@ if (window.__PSD_LOADED) return;
     function postExtensionMessage(type, data = {}) {
         const message = { type, ...data };
         try {
-            chrome.runtime.sendMessage(message);
+            chrome.runtime.sendMessage(message).catch?.(() => {});
         } catch (_) {}
 
         try {
@@ -49,15 +49,12 @@ if (window.__PSD_LOADED) return;
         }));
     }
     const hostIs = name => location.hostname === name || location.hostname.endsWith(`.${name}`);
-    const isClassroomPage = () => hostIs("classroom.google.com");
     const isDrivePage = () => hostIs("drive.google.com") && (/^\/file(?:\/|$)/).test(location.pathname);
     // Video detection and menu integration
     const PROTECTED_DOWNLOAD_MENU_ID = "psd-protected-download-menuitem";
     const PROTECTED_VIDEO_MENU_ID = "psd-protected-video-menuitem";
     let videoStreamDetected = false;
     let videoPlaybackStarted = false;
-    let videoDetectTimer = null;
-    let videoPlaybackListenerInstalled = false;
     let videoDownloadInProgress = false;
     let lastVideoViewerState = false;
     let lastVideoFilenameSent = '';
@@ -213,28 +210,11 @@ if (window.__PSD_LOADED) return;
     function hasMainPagePlaybackStarted() {
         return collectVideoElements().some(video => isVisibleVideoElement(video) && !video.paused && !video.ended && (video.currentTime > 0 || video.readyState >= 3));
     }
-    function setVideoPlaybackStarted(started = true, persist = true) {
-        if (!started) return;
+    function setVideoPlaybackStarted(started = true) {
+        if (!started || videoPlaybackStarted) return;
         videoPlaybackStarted = true;
         updateVideoMenuState();
-        if (persist) {
-            sendAction("videoPlaybackStarted");
-        }
-    }
-    function installVideoPlaybackDetection() {
-        if (videoPlaybackListenerInstalled) return;
-        videoPlaybackListenerInstalled = true;
-        const handlePlayback = event => {
-            const video = event.target;
-            if (!video || String(video.tagName || '').toLowerCase() !== 'video') return;
-            if (!isVisibleVideoElement(video)) return;
-            setVideoPlaybackStarted(true);
-        };
-        document.addEventListener('play', handlePlayback, true);
-        document.addEventListener('playing', handlePlayback, true);
-        setInterval(() => {
-            if (hasMainPagePlaybackStarted()) setVideoPlaybackStarted(true);
-        }, 250);
+        sendAction("videoPlaybackStarted");
     }
     function updateVideoMenuState() {
         const items = document.querySelectorAll('#' + PROTECTED_VIDEO_MENU_ID);
@@ -269,43 +249,9 @@ if (window.__PSD_LOADED) return;
         videoStreamDetected = !!hasStream;
         updateVideoMenuState();
     }
-    function queryVideoStream() {
-        try {
-            chrome.storage.local.get(['capturedStreams'], result => {
-                const streams = result?.capturedStreams || {
-                };
-                if (streams.playbackStarted || streams.video) videoPlaybackStarted = true;
-                setVideoDownloadState(!!streams.video);
-            });
-        }catch (_) {
-        }
-    }
-    function startFileMenuStreamDetection() {
-        queryVideoStream();
-        if (videoDetectTimer) clearInterval(videoDetectTimer);
-        let checks = 0;
-        videoDetectTimer = setInterval(() => {
-            checks++;
-            queryVideoStream();
-            if (checks >= 80) {
-                clearInterval(videoDetectTimer);
-                videoDetectTimer = null;
-            }
-        }, 250);
-    }
-    function installFileButtonDetection() {
-        if (window.__PSD_FILE_DETECT_INSTALLED) return;
-        window.__PSD_FILE_DETECT_INSTALLED = true;
-        document.addEventListener('click', e => {
-            const el = e.target?.closest?.('[role="button"],button');
-            if (!el) return;
-            const aria = normalizeMenuText(el.getAttribute('aria-label') || '').toLowerCase();
-            const text = normalizeMenuText(el.textContent || '').toLowerCase();
-            if (aria === 'file' || text === 'file') {
-                setTimeout(startFileMenuStreamDetection, 30);
-                setTimeout(queryVideoStream, 120);
-            }
-        }, true);
+    function syncVideoStreamState(streams = {}) {
+        if (streams.playbackStarted || streams.video) videoPlaybackStarted = true;
+        setVideoDownloadState(!!streams.video);
     }
 
     async function tryDirectVideoPlayback(videos) {
@@ -317,13 +263,7 @@ if (window.__PSD_LOADED) return;
                 await sleep(250);
                 muteVideo(video);
                 if (!video.paused && !video.ended) {
-                    videoPlaybackStarted = true;
-                    try {
-                        chrome.runtime.sendMessage({
-                            action: "videoPlaybackStarted"
-                        });
-                    } catch (_) {
-                    }
+                    setVideoPlaybackStarted();
                     return {
                         success: true,
                         direct: true,
@@ -394,8 +334,7 @@ if (window.__PSD_LOADED) return;
             collectVideoElements().forEach(muteVideo);
         } catch (_) {
         }
-        videoPlaybackStarted = true;
-        sendAction("videoPlaybackStarted");
+        setVideoPlaybackStarted();
         return {
             success: true
         };
@@ -475,10 +414,10 @@ if (window.__PSD_LOADED) return;
         try {
             chrome.storage.onChanged.addListener((changes, area) => {
                 if (area !== 'local' || !changes.capturedStreams) return;
-                const next = changes.capturedStreams.newValue || {
-                };
-                if (next.playbackStarted || next.video) videoPlaybackStarted = true;
-                setVideoDownloadState(!!next.video);
+                syncVideoStreamState(changes.capturedStreams.newValue || {});
+            });
+            chrome.storage.local.get({ capturedStreams: {} }, result => {
+                syncVideoStreamState(result?.capturedStreams || {});
             });
         }catch (_) {
         }
@@ -542,14 +481,6 @@ if (window.__PSD_LOADED) return;
         );
         if (!item) return false;
 
-        // Detach the cloned Drive row from its original action/disabled state.
-        item.removeAttribute("jsaction");
-        item.removeAttribute("aria-disabled");
-        item.removeAttribute("disabled");
-        item.setAttribute("role", "menuitem");
-        item.setAttribute("tabindex", "0");
-        item.setAttribute("aria-label", "Download Video");
-
         const label = item.querySelector('[jsname="K4r5Ff"]');
         if (label) {
             label.classList.add("psd-video-menu-label");
@@ -575,7 +506,6 @@ if (window.__PSD_LOADED) return;
         const parent = securityRow.parentNode;
         const shareRow = findShareRow(menu);
         insertAfterReference(parent, item, shareRow || null);
-        queryVideoStream();
         return true;
     }
     const addProtectedPDFMenuDescription = item => addMenuDescription(item, "psd-pdf-menu-label", "psd-pdf-menu-info", "Standard downloads are disabled for this file. This option captures each page and combines them into a downloadable PDF.");
@@ -605,8 +535,7 @@ if (window.__PSD_LOADED) return;
                 if (!hasNativeDownload) {
                     addProtectedVideoMenuItem(menu);
                 }
-                queryVideoStream();
-                continue;
+                        continue;
             }
             // For PDFs, use the actual Download menu item as the source of truth.
             // Do not use Print or Security limitations to decide whether to inject.
@@ -645,30 +574,22 @@ if (window.__PSD_LOADED) return;
     function installFramePlaybackRelay() {
         if (window.__PSD_FRAME_PLAYBACK_RELAY) return;
         window.__PSD_FRAME_PLAYBACK_RELAY = true;
+
         const relay = event => {
-            const target = event.target;
-            if (!target || String(target.tagName || '').toLowerCase() !== 'video') return;
-            if (!isVisibleVideoElement(target)) return;
-            videoPlaybackStarted = true;
-            sendAction("videoPlaybackStarted");
+            const video = event.target;
+            if (!video || String(video.tagName || '').toLowerCase() !== 'video') return;
+            if (!isVisibleVideoElement(video)) return;
+            setVideoPlaybackStarted();
         };
+
         document.addEventListener('play', relay, true);
         document.addEventListener('playing', relay, true);
-        const poll = () => {
-            try {
-                if (hasMainPagePlaybackStarted()) {
-                    videoPlaybackStarted = true;
-                    try {
-                        chrome.runtime.sendMessage({
-                            action: 'videoPlaybackStarted'
-                        });
-                    }catch (_) {
-                    }
-                }
-            }catch (_) {
-            }
-        };
-        setInterval(poll, 250);
+
+        let checks = 0;
+        const poll = setInterval(() => {
+            if (hasMainPagePlaybackStarted()) setVideoPlaybackStarted();
+            if (++checks >= 20) clearInterval(poll);
+        }, 250);
     }
     function scanDriveMenus() {
         try {
@@ -678,6 +599,7 @@ if (window.__PSD_LOADED) return;
                 if (playerOpen && !lastVideoViewerState) {
                     videoStreamDetected = false;
                     videoPlaybackStarted = false;
+                    lastVideoFilenameSent = "";
                     updateVideoMenuState();
                     sendAction("clearVideoStream");
                     updateCapturedVideoFilename();
@@ -694,10 +616,8 @@ if (window.__PSD_LOADED) return;
     }
     function watchDriveMenus() {
         if (!isDrivePage()) return;
-        installFileButtonDetection();
         installVideoMenuClickGuard();
         installStreamStorageListener();
-        installVideoPlaybackDetection();
         scanDriveMenus();
         let scanTimer = null;
         const scheduleScan = () => {
@@ -709,7 +629,7 @@ if (window.__PSD_LOADED) return;
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["style", "class", "aria-hidden"]
+            attributeFilter: ["aria-hidden"]
         });
         setInterval(scheduleScan, 1000);
     }
@@ -816,7 +736,6 @@ if (window.__PSD_LOADED) return;
     }
     async function waitForCurrentPageImage(pageNumber, previousSrc = "", timeout = IMAGE_WAIT_FAST) {
         const start = performance.now();
-        let last = null;
         let stableSrc = "";
         let stableSince = 0;
         let sameSrcSince = 0;
@@ -825,7 +744,6 @@ if (window.__PSD_LOADED) return;
             if (info?.current === pageNumber) {
                 const img = getCurrentPageImage();
                 if (img) {
-                    last = img;
                     const src = img.currentSrc || img.src || "";
                     const valid = src && img.complete && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H;
                     if (valid) {
@@ -1196,7 +1114,7 @@ if (window.__PSD_LOADED) return;
             updateWindowControl();
         }
     }
-    function updateInPageOverlay(status, detail, percent, count) {
+    function updateInPageOverlay(status, detail, percent) {
         const root = document.getElementById("psd-inpage-overlay");
         if (!root) return;
         const title = root.querySelector("#psd-inpage-title");
@@ -1234,7 +1152,7 @@ if (window.__PSD_LOADED) return;
             total: currentTotalHint || count,
             percent
         });
-        updateInPageOverlay(status, detail, percent, count);
+        updateInPageOverlay(status, detail, percent);
     }
     function showUnsupportedFile() {
         clearTimeout(unsupportedTimer);
@@ -1303,9 +1221,9 @@ if (window.__PSD_LOADED) return;
             input, current: Number(input.value), max: Number(input.max) || getPageCountHint()
         };
     }
+    const pageInputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
     async function goToPage(pageNumber) {
         const target = String(pageNumber);
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         for (let attempt = 0;
         attempt < 3;
         attempt++) {
@@ -1319,7 +1237,7 @@ if (window.__PSD_LOADED) return;
                 input.focus();
             }catch (_) {
             }
-            if (setter) setter.call(input, target);
+            if (pageInputSetter) pageInputSetter.call(input, target);
             else input.value = target;
             input.dispatchEvent(new Event('input', {
                 bubbles: true
@@ -1373,7 +1291,6 @@ if (window.__PSD_LOADED) return;
         capturedPages.clear();
         currentTotalHint = null;
         orderCounter = 0;
-        imageCache?.clear?.();
     }
     function rememberCapturedPage(pageNumber, image) {
         const src = image?.currentSrc || image?.src || "";
@@ -1394,8 +1311,8 @@ if (window.__PSD_LOADED) return;
         }
         return true;
     }
-    async function capturePagesByNumber(pageInfo, totalHint) {
-        if (!pageInfo || !totalHint) return;
+    async function capturePagesByNumber(totalHint) {
+        if (!totalHint) return;
         reportProgress("Preparing…", `Checking first page / ${totalHint}`, 0, 0);
         await goToPage(1);
         const firstImage = await waitForFirstPageReady();
@@ -1563,7 +1480,7 @@ if (window.__PSD_LOADED) return;
         currentTotalHint = totalHint;
         logProgressEvent(`Detected page count: ${totalHint || "unknown"}`);
         if (pageInfo && totalHint) {
-            await capturePagesByNumber(pageInfo, totalHint);
+            await capturePagesByNumber(totalHint);
         } else {
             await capturePagesByScrolling(totalHint);
         }
@@ -1577,25 +1494,22 @@ if (window.__PSD_LOADED) return;
             await waitForCurrentPageImage(1, "", IMAGE_WAIT_FAST);
         }
         showScrollDim(false);
-        const total = totalHint || capturedPages.size || pages.size;
-        ready = capturedPages.size > 0 &&
-            (!totalHint || capturedPages.size >= totalHint);
+        const capturedCount = totalHint ? capturedPages.size : pages.size;
+        const total = totalHint || capturedCount;
+        ready = capturedCount > 0 && (!totalHint || capturedCount >= totalHint);
         running = false;
         setButtons();
         const detail = ready
-            ? `${capturedPages.size} / ${total} page images captured`
-            : `${capturedPages.size} / ${total || "?"} page images captured. Try Start again.`;
+            ? `${capturedCount} / ${total} page images captured`
+            : `${capturedCount} / ${total || "?"} page images captured. Try Start again.`;
         const percent = ready
             ? 100
-            : Math.min(
-                99,
-                Math.floor(capturedPages.size / Math.max(1, total) * 100)
-            );
+            : Math.min(99, Math.floor(capturedCount / Math.max(1, total) * 100));
         reportProgress(
             ready ? "Ready to process PDF" : "Some pages were not captured",
             detail,
             percent,
-            capturedPages.size
+            capturedCount
         );
         logProgressEvent(
             ready
@@ -1676,16 +1590,11 @@ if (window.__PSD_LOADED) return;
             }
         });
     }
-    const imageCache = new Map();
     async function encodePageAsJPEG(page) {
-        let img = imageCache.get(page.src);
+        let img = [...document.images].find(i => (i.currentSrc || i.src) === page.src);
         if (!img) {
-            img = [...document.images].find(i => (i.currentSrc || i.src) === page.src);
-            if (!img) {
-                img = new Image();
-                img.src = page.src;
-            }
-            imageCache.set(page.src, img);
+            img = new Image();
+            img.src = page.src;
         }
         if (!img.complete) await img.decode();
 
@@ -1837,7 +1746,7 @@ if (window.__PSD_LOADED) return;
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
         running = false;
-        completed = false;
+        completed = true;
         ready = false;
         resetCaptureState();
         setButtons();
@@ -1965,11 +1874,10 @@ async function startPDFDownload(options = {}) {
     //   Downloading -> Merging -> Processing download -> Download has started -> Video Downloaded
     const videoOverlay = window.GDriveVideoOverlay;
     if (!videoOverlay) throw new Error("Video overlay module failed to load.");
-    const videoStageTypes = new Set(["videoDownloadState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
+    const videoStageTypes = new Set(["videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
     const setVideoBusy = busy => { videoDownloadInProgress = busy; updateVideoMenuState(); };
     chrome.runtime.onMessage.addListener(msg => {
         if (window.top !== window.self || !videoStageTypes.has(msg?.type)) return;
-        if (msg.type === "videoDownloadState") return setVideoBusy(msg.state === "busy");
         if (msg.type === "videoStagePreload") {
             const job = videoOverlay.getJobId(), stage = videoOverlay.getStage();
             if ((job && job !== msg.jobId && !["ready", "cancelled", "error"].includes(stage)) || (job === msg.jobId && stage !== "download")) return;
@@ -2004,12 +1912,6 @@ async function startPDFDownload(options = {}) {
                 videoOverlay.clearJob(); setVideoBusy(false); videoOverlay.update({ stage: "cancel" });
                 break;
         }
-    });
-    chrome.storage.onChanged.addListener((changes, namespace) => {
-        const next = namespace === "local" && changes.capturedStreams?.newValue;
-        if (!next) return;
-        if (next.playbackStarted) videoPlaybackStarted = true;
-        setVideoDownloadState(!!next.video);
     });
     // Keep one consistent in-page controller. It never hides when the extension popup opens.
     // Install this in every content-script frame so Drive's actual player can
