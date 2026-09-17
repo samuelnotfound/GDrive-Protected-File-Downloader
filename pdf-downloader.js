@@ -12,13 +12,14 @@
     const MIN_W = 500;
     const MIN_H = 300;
     // Normal capture is intentionally short. Missed pages are handled by the recovery pass.
-    const IMAGE_WAIT_FAST = 700;
-    const IMAGE_WAIT_RECOVERY = 1800;
-    const PAGE_COUNT_WAIT = 800;
-    const POLL_INTERVAL = 35;
-    const IMAGE_STABLE_MS = 40;
-    const PAGE_NAV_WAIT = 250;
-    const SCROLL_SETTLE = 60;
+    // Keep the first pass fast. Slow pages are intentionally left for recovery.
+    const IMAGE_WAIT_FAST = 320;
+    const IMAGE_WAIT_RECOVERY = 1200;
+    const PAGE_COUNT_WAIT = 700;
+    const POLL_INTERVAL = 25;
+    const IMAGE_STABLE_MS = 25;
+    const PAGE_NAV_WAIT = 120;
+    const SCROLL_SETTLE = 45;
 
     function reportProgress(status, detail, percent = null, count = null) {
         app.postExtensionMessage('info', {
@@ -221,20 +222,24 @@
             if (info?.current === pageNumber) {
                 const img = getCurrentPageImage();
                 const src = img?.currentSrc || img?.src || "";
-                const valid = !!(img && img.complete && src.startsWith(PREFIX) && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H && (allowSameSrc || src !== previousSrc));
+                const valid = !!(
+                    img && img.complete &&
+                    src.startsWith(PREFIX) &&
+                    img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H &&
+                    (allowSameSrc || src !== previousSrc)
+                );
 
                 if (valid) {
                     if (src !== stableSrc) {
                         stableSrc = src;
                         stableSince = performance.now();
                     } else if (performance.now() - stableSince >= IMAGE_STABLE_MS) {
-                        try {
-                            await img.decode();
-                        } catch (_) {
-                            return null;
+                        // The image is already complete and has real dimensions.
+                        // Do not await img.decode() here; Drive can leave decode() pending
+                        // long after the image is visibly rendered, which stalls capture.
+                        if ((img.currentSrc || img.src || "") === src && getPageInput()?.current === pageNumber) {
+                            return img;
                         }
-                        const finalSrc = img.currentSrc || img.src || "";
-                        if (finalSrc === src && Number(getPageInput()?.current) === pageNumber) return img;
                     }
                 }
             }
@@ -461,36 +466,45 @@
     }
 
     async function recoverMissingPages(totalHint) {
-        if (!totalHint || pdf.capturedPages.size >= totalHint || pdf.stopRequested) return;
+        if (!totalHint || pdf.stopRequested) return;
 
-        const missing = [];
-        for (let pageNumber = 1; pageNumber <= totalHint; pageNumber++) {
-            if (!pdf.capturedPages.has(pageNumber)) missing.push(pageNumber);
-        }
-        if (!missing.length) return;
+        for (let pass = 1; pass <= 2 && !pdf.stopRequested; pass++) {
+            const missing = [];
+            for (let pageNumber = 1; pageNumber <= totalHint; pageNumber++) {
+                if (!pdf.capturedPages.has(pageNumber)) missing.push(pageNumber);
+            }
+            if (!missing.length) return;
 
-        logProgressEvent(`⚠ ${missing.length} pages missing. Running one targeted recovery pass…`);
-        for (let i = 0; i < missing.length && !pdf.stopRequested; i++) {
-            const pageNumber = missing[i];
-            const before = getPageInput()?.current || 0;
-            const previous = getCurrentPageImage();
-            const previousSrc = previous?.currentSrc || previous?.src || "";
-            const image = await (async () => {
-                if (!(await goToPage(pageNumber, 500))) return null;
-                const samePage = before === pageNumber;
-                return waitForCurrentPageImage(pageNumber, previousSrc, IMAGE_WAIT_RECOVERY, samePage && previousSrc !== "");
-            })();
+            logProgressEvent(`⚠ ${missing.length} pages missing. Recovery pass ${pass}/2…`);
+            let recovered = 0;
 
-            if (image) rememberCapturedPage(pageNumber, image);
-            reportProgress(
-                "Preparing…",
-                `Recovery ${i + 1} / ${missing.length} — page ${pageNumber}`,
-                50 + Math.floor((i + 1) / missing.length * 25),
-                pdf.capturedPages.size
-            );
+            for (let i = 0; i < missing.length && !pdf.stopRequested; i++) {
+                const pageNumber = missing[i];
+                const before = getPageInput()?.current || 0;
+                const previous = getCurrentPageImage();
+                const previousSrc = previous?.currentSrc || previous?.src || "";
+
+                if (await goToPage(pageNumber, 300)) {
+                    const image = await waitForCurrentPageImage(
+                        pageNumber,
+                        previousSrc,
+                        IMAGE_WAIT_RECOVERY,
+                        before === pageNumber && !!previousSrc
+                    );
+                    if (image && rememberCapturedPage(pageNumber, image)) recovered++;
+                }
+
+                reportProgress(
+                    "Preparing…",
+                    `Recovery ${i + 1} / ${missing.length} — page ${pageNumber}`,
+                    50 + Math.floor((i + 1) / missing.length * 25),
+                    pdf.capturedPages.size
+                );
+            }
+
+            if (!recovered) break;
         }
     }
-
     function finishCancelledCapture() {
         app.ui.showScrollDim(false);
         pdf.running = false;

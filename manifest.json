@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GDrive View-Only PDF & Video Downloader",
-  "version": "1.46.1",
+  "version": "1.57.0",
   "description": "Downloads view-only Google Drive PDFs and videos using the rendered PDF pages and captured Google Drive media streams.",
   "permissions": [
     "activeTab",

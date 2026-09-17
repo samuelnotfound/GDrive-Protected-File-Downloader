@@ -98,13 +98,26 @@
 
     async function process(job, videoBlob, audioBlob) {
         downloader.throwIfCancelled();
-        const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
-        downloader.throwIfCancelled();
+
+        // Report the merge stage BEFORE starting FFmpeg. Previously this was
+        // sent only after FFmpeg finished, so a merge failure looked like the
+        // downloader had simply stopped.
         downloader.postStageMessage('videoStageStatus', {
             jobId: job.jobId,
-            stage: 'processing'
+            stage: 'merge',
+            message: 'Merging video and audio'
         });
-        await triggerDownload(mergedBlob, job.filename, job.jobId);
+
+        const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
+        downloader.throwIfCancelled();
+
+        downloader.postStageMessage('videoStageStatus', {
+            jobId: job.jobId,
+            stage: 'processing',
+            message: 'Preparing the final video'
+        });
+
+        await triggerDownload(mergedBlob, job.filename || 'gdrive-video.mp4', job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
     }
 

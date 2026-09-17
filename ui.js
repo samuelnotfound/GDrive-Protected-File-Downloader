@@ -34,6 +34,18 @@
         videoMenu: 'psd-protected-video-menuitem'
     };
 
+    let openQualityPicker = null;
+    const closeOpenQualityPicker = () => {
+        const picker = openQualityPicker;
+        if (!picker?.isConnected) {
+            openQualityPicker = null;
+            return;
+        }
+        picker.querySelector('.psd-quality-dropdown')?.setAttribute('hidden', '');
+        picker.querySelector('.psd-quality-button')?.setAttribute('aria-expanded', 'false');
+        openQualityPicker = null;
+    };
+
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const sendAction = (action, data = {}) => {
         try {
@@ -331,6 +343,213 @@
         setInterval(scheduleScan, 1000);
     }
 
+
+    function addDownloadQualityPicker(item) {
+        if (!item) return null;
+
+        if (item.__psdQualityPicker) {
+            if (!item.__psdQualityPicker.isConnected && item.parentNode) {
+                item.parentNode.insertBefore(item.__psdQualityPicker, item.nextSibling);
+            }
+            return item.__psdQualityPicker;
+        }
+
+        const row = document.createElement('div');
+        row.className = 'psd-quality-menu-row';
+        row.setAttribute('role', 'presentation');
+        row.innerHTML = `
+            <span class="psd-quality-label">Quality:</span>
+            <div class="psd-quality-control-wrap">
+                <button class="psd-quality-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose video quality">
+                    <span class="psd-quality-value">Detecting…</span>
+                    <svg class="psd-quality-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"></path></svg>
+                </button>
+                <div class="psd-quality-dropdown" role="listbox" hidden></div>
+            </div>`;
+
+        const button = row.querySelector('.psd-quality-button');
+        const valueNode = row.querySelector('.psd-quality-value');
+        const dropdown = row.querySelector('.psd-quality-dropdown');
+
+        const close = () => {
+            dropdown.hidden = true;
+            button.setAttribute('aria-expanded', 'false');
+            if (openQualityPicker === row) openQualityPicker = null;
+        };
+        const toggle = () => {
+            if (button.disabled || !dropdown.children.length) return;
+            if (openQualityPicker && openQualityPicker !== row) closeOpenQualityPicker();
+            const open = dropdown.hidden;
+            dropdown.hidden = !open;
+            button.setAttribute('aria-expanded', String(open));
+            openQualityPicker = open ? row : null;
+            if (open) row.closest('[role="menu"]')?.style.setProperty('overflow', 'visible', 'important');
+        };
+        const selectQuality = quality => {
+            const option = [...dropdown.querySelectorAll('.psd-quality-option')]
+                .find(node => node.dataset.quality === quality);
+            if (!option) return;
+            item.__psdQualityValue = quality;
+            button.dataset.quality = quality;
+            valueNode.textContent = option.dataset.label || option.textContent.trim();
+            item.__psdQualityOnChange?.(quality);
+            dropdown.querySelectorAll('.psd-quality-option').forEach(node => {
+                const selected = node === option;
+                node.classList.toggle('selected', selected);
+                node.setAttribute('aria-selected', String(selected));
+                node.tabIndex = selected ? 0 : -1;
+            });
+            close();
+        };
+
+        row.addEventListener('pointerdown', event => event.stopPropagation());
+        row.addEventListener('mousedown', event => event.stopPropagation());
+        row.addEventListener('click', event => event.stopPropagation());
+        row.addEventListener('keydown', event => event.stopPropagation());
+
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggle();
+        });
+        button.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                event.stopPropagation();
+                toggle();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+            }
+        });
+
+        dropdown.addEventListener('click', event => {
+            const option = event.target.closest('.psd-quality-option');
+            if (!option) return;
+            event.preventDefault();
+            event.stopPropagation();
+            selectQuality(option.dataset.quality || '');
+        });
+
+        row.__psdToggle = toggle;
+        row.__psdSelectQuality = selectQuality;
+        row.__psdClose = close;
+
+        const styleId = 'psd-quality-picker-style';
+        if (!document.getElementById(styleId)) {
+            const style = document.createElement('style');
+            style.id = styleId;
+            style.textContent = `
+.psd-quality-menu-row {
+    box-sizing:border-box; position:relative; z-index:20; width:100%; overflow:visible;
+    display:flex; align-items:center; gap:7px; min-height:42px; padding:5px 16px 10px 79px;
+    background:transparent; font-family:"Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    border-bottom:1px solid rgba(255,255,255,.10);
+}
+.psd-quality-menu-row .psd-quality-label {
+    color:#bdc1c6; font:500 13px/20px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    white-space:nowrap; user-select:none;
+}
+.psd-quality-menu-row .psd-quality-control-wrap { position:relative; flex:none; }
+.psd-quality-menu-row .psd-quality-button {
+    box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; gap:8px;
+    width:88px; height:32px; padding:0 9px 0 11px; border:0; border-radius:8px;
+    background:#3c4043; color:#e8eaed; font:500 13px/20px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    cursor:pointer; outline:none; appearance:none; -webkit-appearance:none;
+}
+.psd-quality-menu-row .psd-quality-button:hover:not(:disabled) { background:#45484b; }
+.psd-quality-menu-row .psd-quality-button:focus-visible { box-shadow:0 0 0 2px rgba(168,199,250,.7); }
+.psd-quality-menu-row .psd-quality-button:disabled { color:#9aa0a6; background:#303134; cursor:default; opacity:.7; }
+.psd-quality-menu-row .psd-quality-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.psd-quality-menu-row .psd-quality-arrow { width:15px; height:15px; flex:none; fill:#bdc1c6; pointer-events:none; }
+.psd-quality-menu-row .psd-quality-dropdown {
+    position:absolute; top:calc(100% + 6px); left:0; width:100px; max-height:180px; overflow:auto;
+    box-sizing:border-box; padding:4px; background:#2b2c2f; border:1px solid #45464a; border-radius:10px;
+    box-shadow:0 8px 24px rgba(0,0,0,.42),0 2px 6px rgba(0,0,0,.28); z-index:2147483647;
+}
+.psd-quality-menu-row .psd-quality-dropdown[hidden] { display:none !important; }
+.psd-quality-menu-row .psd-quality-option {
+    box-sizing:border-box; width:100%; min-height:32px; padding:0 7px 0 9px; border:0; border-radius:7px;
+    background:transparent; color:#e8eaed; display:flex; align-items:center; justify-content:space-between;
+    font:500 13px/18px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    cursor:pointer; outline:none; text-align:left;
+}
+.psd-quality-menu-row .psd-quality-option:hover,
+.psd-quality-menu-row .psd-quality-option:focus-visible { background:#3c4043; }
+.psd-quality-menu-row .psd-quality-option.selected { color:#a8c7fa; }
+.psd-quality-menu-row .psd-quality-check { width:15px; height:15px; fill:currentColor; opacity:0; flex:none; pointer-events:none; }
+.psd-quality-menu-row .psd-quality-option.selected .psd-quality-check { opacity:1; }
+`;
+            document.head.appendChild(style);
+        }
+
+        item.__psdQualityPicker = row;
+        item.__psdQualityControl = button;
+        item.__psdQualityValue = '';
+        if (item.parentNode) item.parentNode.insertBefore(row, item.nextSibling);
+        return row;
+    }
+
+    function setDownloadQualityOptions(item, options = [], selectedValue = '') {
+        const picker = addDownloadQualityPicker(item);
+        if (!picker) return '';
+        const button = item.__psdQualityControl;
+        const valueNode = picker.querySelector('.psd-quality-value');
+        const dropdown = picker.querySelector('.psd-quality-dropdown');
+        const normalized = options
+            .map(option => typeof option === 'string' ? { label: option, value: option } : option)
+            .filter(option => option?.label && option?.value);
+
+        dropdown.replaceChildren();
+        if (!normalized.length) {
+            valueNode.textContent = 'Detecting…';
+            button.disabled = true;
+            button.dataset.quality = '';
+            item.__psdQualityValue = '';
+            return '';
+        }
+
+        normalized.forEach(option => {
+            const node = document.createElement('button');
+            node.type = 'button';
+            node.className = 'psd-quality-option';
+            node.dataset.quality = option.value;
+            node.dataset.label = option.label;
+            node.setAttribute('role', 'option');
+            node.setAttribute('aria-selected', 'false');
+            node.tabIndex = -1;
+            node.innerHTML = `<span>${option.label}</span><svg class="psd-quality-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg>`;
+            dropdown.appendChild(node);
+        });
+
+        const requested = selectedValue && normalized.some(option => option.value === selectedValue)
+            ? selectedValue
+            : normalized[0].value;
+        const selected = normalized.find(option => option.value === requested) || normalized[0];
+        item.__psdQualityValue = selected.value;
+        button.dataset.quality = selected.value;
+        valueNode.textContent = selected.label;
+        button.disabled = false;
+        dropdown.querySelectorAll('.psd-quality-option').forEach(node => {
+            const active = node.dataset.quality === selected.value;
+            node.classList.toggle('selected', active);
+            node.setAttribute('aria-selected', String(active));
+            node.tabIndex = active ? 0 : -1;
+        });
+        return selected.value;
+    }
+
+    function getDownloadQuality(item) {
+        return item?.__psdQualityValue || '';
+    }
+
+    function setDownloadQualityDisabled(item, disabled) {
+        const button = item?.__psdQualityControl;
+        if (button) button.disabled = !!disabled || !item.__psdQualityValue;
+    }
+
+
     app.sleep = sleep;
     app.sendAction = sendAction;
     app.muteVideo = muteVideo;
@@ -350,6 +569,10 @@
         styleDownloadMenuItem,
         handleMenuKeyboardActivation,
         addMenuDescription,
+        addDownloadQualityPicker,
+        setDownloadQualityOptions,
+        getDownloadQuality,
+        setDownloadQualityDisabled,
         createInPageOverlay,
         showScrollDim,
         showInPageOverlay,
@@ -384,7 +607,7 @@
     const CIRCUMFERENCE = 106.81415022205297;
     const DOWNLOAD_WEIGHT = 0.75;
     const state = {
-        jobId: null, stage: 'download', merge: 0, fixedTotals: {
+        jobId: null, stage: 'download', merge: 0, resolution: '', fixedTotals: {
             video: 0, audio: 0
         }, bytes: {
             video: {
@@ -511,6 +734,9 @@
     white-space: normal;
     overflow-wrap: anywhere;
 }
+#psd-video-progress-detail > div {
+    line-height: 18px;
+}
 #psd-video-progress-cancel,         #psd-video-progress-close {
     border: 0;
     box-sizing: border-box;
@@ -600,7 +826,11 @@
             </div>
             <div id="psd-video-progress-title-wrap">
               <div id="psd-video-progress-title">Downloading Stream</div>
-              <div id="psd-video-progress-detail">Download will start slow, please wait!</div>
+              <div id="psd-video-progress-detail">
+                <div id="psd-video-progress-quality">Video Quality: Detecting…</div>
+                <div id="psd-video-progress-video-info">Video: 0 B / 0 B</div>
+                <div id="psd-video-progress-audio-info">Audio: 0 B / 0 B</div>
+            </div>
             </div>
             <button id="psd-video-progress-cancel" type="button">Cancel</button>
             <button id="psd-video-progress-close" type="button" aria-label="Close">×</button>
@@ -648,36 +878,43 @@
         bindOverlayEvents(root);
         return root;
     }
-    function combinedTotal() {
-        const videoTotal = Math.max(0, Number(state.fixedTotals.video) || 0);
-        const audioTotal = Math.max(0, Number(state.fixedTotals.audio) || 0);
-        return videoTotal + audioTotal;
-    }
-    function combinedReceived() {
-        const videoReceived = Math.max(0, Number(state.bytes.video.received) || 0);
-        const audioReceived = Math.max(0, Number(state.bytes.audio.received) || 0);
-        return videoReceived + audioReceived;
-    }
     function downloadOverallPercent() {
-        const combinedSize = combinedTotal();
-        if (!combinedSize) return 0;
-        const combinedDownloaded = Math.min(combinedSize, combinedReceived());
-        return Math.max(0, Math.min(1, combinedDownloaded / combinedSize));
+        const total = Math.max(0, (Number(state.fixedTotals.video) || 0) + (Number(state.fixedTotals.audio) || 0));
+        if (!total) return 0;
+        const received = Math.max(0, Number(state.bytes.video.received) || 0) + Math.max(0, Number(state.bytes.audio.received) || 0);
+        return Math.max(0, Math.min(1, received / total));
     }
-    function setRing(overallPercent) {
+    function setRing(percent) {
         const root = ensure();
         if (!root) return;
         const ring = root.querySelector('#psd-video-progress-ring');
-        const progress = Math.max(0, Math.min(100, Number(overallPercent) || 0)) / 100;
-        if (ring) {
-            ring.style.strokeDasharray = String(CIRCUMFERENCE);
-            ring.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - progress));
-        }
+        if (!ring) return;
+        const progress = Math.max(0, Math.min(100, Number(percent) || 0)) / 100;
+        ring.style.strokeDasharray = String(CIRCUMFERENCE);
+        ring.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - progress));
     }
     function stageRank(stage) {
-        return({
-            download: 1, merge: 2, processing: 3, started: 4, ready: 5, cancel: 99, error: 99
-        })[stage] || 0;
+        return ({ download: 1, merge: 2, processing: 3, started: 4, ready: 5, cancel: 99, error: 99 })[stage] || 0;
+    }
+    function updateSizeInfo() {
+        const root = ensure();
+        if (!root) return;
+        const videoInfo = root.querySelector('#psd-video-progress-video-info');
+        const audioInfo = root.querySelector('#psd-video-progress-audio-info');
+        const qualityInfo = root.querySelector('#psd-video-progress-quality');
+        const video = state.bytes.video;
+        const audio = state.bytes.audio;
+        const videoTotal = Math.max(0, Number(state.fixedTotals.video) || 0);
+        const audioTotal = Math.max(0, Number(state.fixedTotals.audio) || 0);
+        const videoReceived = Math.min(videoTotal || Number(video.received) || 0, Math.max(0, Number(video.received) || 0));
+        const audioReceived = Math.min(audioTotal || Number(audio.received) || 0, Math.max(0, Number(audio.received) || 0));
+        if (qualityInfo) {
+            qualityInfo.textContent = state.resolution
+                ? `Video Quality: ${state.resolution}`
+                : 'Video Quality: Detecting…';
+        }
+        if (videoInfo) videoInfo.textContent = `Video: ${formatBytes(videoReceived)} / ${formatBytes(videoTotal)}`;
+        if (audioInfo) audioInfo.textContent = `Audio: ${formatBytes(audioReceived)} / ${formatBytes(audioTotal)}`;
     }
     function setState(stage, detail = null, force = false) {
         const root = ensure();
@@ -685,27 +922,34 @@
         if (!force && stageRank(stage) < stageRank(state.stage)) return;
         root.classList.remove('processing', 'started', 'completed', 'cancelled', 'error');
         const title = root.querySelector('#psd-video-progress-title');
-        const info = root.querySelector('#psd-video-progress-detail');
+        const detailNode = root.querySelector('#psd-video-progress-detail');
         const cancel = root.querySelector('#psd-video-progress-cancel');
+        updateSizeInfo();
         if (stage === 'download') {
-            title.textContent = 'Downloading Stream';
-            info.textContent = combinedTotal()  ? `Estimated Size: ${formatBytes(combinedTotal())}`: 'Download will start slow, please wait!';
+            title.textContent = 'Downloading stream';
+            detailNode.innerHTML = `
+                <div id="psd-video-progress-quality"></div>
+                <div id="psd-video-progress-video-info"></div>
+                <div id="psd-video-progress-audio-info"></div>`;
+            detailNode.style.display = 'block';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
-        }else if (stage === 'merge') {
+        } else if (stage === 'merge') {
             title.textContent = 'Merging video + audio';
-            info.textContent = 'Download will begin shortly, please wait.';
+            detailNode.textContent = 'Download will start shortly, please wait.';
+            detailNode.style.display = 'block';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
-        }else if (stage === 'processing') {
+        } else if (stage === 'processing') {
             title.textContent = 'Finalizing download';
-            info.textContent = 'Please wait..';
+            detailNode.textContent = 'Download will start shortly, please wait.';
+            detailNode.style.display = 'block';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             root.classList.add('processing');
-        }else if (stage === 'started') {
+        } else if (stage === 'started') {
             title.textContent = 'Download has started';
-            info.textContent = '';
+            detailNode.style.display = 'none';
             cancel.style.display = 'none';
             root.classList.add('started');
             const ring = root.querySelector('#psd-video-progress-ring');
@@ -713,24 +957,26 @@
                 ring.style.strokeDasharray = '30 77';
                 ring.style.strokeDashoffset = '0';
             }
-        }else if (stage === 'ready') {
+        } else if (stage === 'ready') {
             title.textContent = 'Video downloaded';
-            info.textContent = '';
+            detailNode.style.display = 'none';
             cancel.style.display = 'none';
             root.classList.add('completed');
             setRing(100);
-        }else if (stage === 'cancel') {
+        } else if (stage === 'cancel') {
             title.textContent = 'Download Cancelled';
-            info.textContent = '';
+            detailNode.style.display = 'none';
             cancel.style.display = 'none';
             root.classList.add('cancelled');
-        }else if (stage === 'error') {
+        } else if (stage === 'error') {
             title.textContent = 'Video download failed';
-            info.textContent = detail || 'The video could not be downloaded.';
+            detailNode.style.display = 'block';
+            detailNode.textContent = detail || 'The video could not be downloaded.';
             cancel.style.display = 'none';
             root.classList.add('error');
         }
         state.stage = stage;
+        updateSizeInfo();
     }
     function formatBytes(bytes) {
         const n = Math.max(0, Number(bytes) || 0);
@@ -746,7 +992,7 @@
         const digits = value >= 100  ? 0: value >= 10  ? 1: 2;
         return `${value.toFixed(digits)} ${unit}`;
     }
-    function show(visible = true, jobId = null, videoTotal = 0, audioTotal = 0) {
+    function show(visible = true, jobId = null, videoTotal = 0, audioTotal = 0, resolution = '') {
         const root = ensure();
         if (!root) return;
         if (!visible) {
@@ -761,6 +1007,7 @@
         state.jobId = jobId || null;
         state.stage = 'download';
         state.merge = 0;
+        state.resolution = String(resolution || '').trim();
         state.fixedTotals.video = Math.max(0, Number(videoTotal) || 0);
         state.fixedTotals.audio = Math.max(0, Number(audioTotal) || 0);
         state.bytes.video = {
@@ -772,8 +1019,9 @@
         setRing(0);
         setState('download', null, true);
     }
-    function setJob(jobId, videoTotal = 0, audioTotal = 0) {
+    function setJob(jobId, videoTotal = 0, audioTotal = 0, resolution = '') {
         state.jobId = jobId || state.jobId;
+        if (resolution) state.resolution = String(resolution).trim();
         if (videoTotal) {
             state.fixedTotals.video = Number(videoTotal) || state.fixedTotals.video;
             state.bytes.video.total = state.fixedTotals.video;
@@ -795,6 +1043,7 @@
     }) {
         const root = ensure();
         if (!root) return;
+        if (msg.resolution) state.resolution = String(msg.resolution).trim();
         if (msg.label === 'video' || msg.label === 'audio') {
             const bucket = state.bytes[msg.label];
             bucket.received = Math.max(bucket.received, Number(msg.received) || 0);
@@ -803,6 +1052,7 @@
                 state.fixedTotals[msg.label] = fallbackTotal;
                 bucket.total = fallbackTotal;
             }
+            updateSizeInfo();
             const percent = downloadOverallPercent();
             if (state.stage === 'download') setRing(percent * DOWNLOAD_WEIGHT * 100);
             return;
