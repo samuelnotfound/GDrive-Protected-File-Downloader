@@ -7,15 +7,8 @@
 function cleanURL(url) {
     if (!url) return null;
     const value = String(url);
-    const hashIndex = value.indexOf('#');
-    const hash = hashIndex === -1 ? '' : value.slice(hashIndex);
-    const main = hashIndex === -1 ? value : value.slice(0, hashIndex);
-    const queryIndex = main.indexOf('?');
-    if (queryIndex === -1) return value;
-    const base = main.slice(0, queryIndex);
-    const query = main.slice(queryIndex + 1);
-    const parts = query.split('&').filter(part => !/^range=/i.test(part));
-    return base + (parts.length ? `?${parts.join('&')}` : '') + hash;
+    const rangeIndex = value.search(/[?&]range=/i);
+    return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
 }
 function sanitizeVideoFilename(name) {
     let value = String(name || '').trim().replace(/[\\/:*?"<>|]+/g, '_').replace(/[\x00-\x1F]/g, '').trim();
@@ -30,12 +23,6 @@ const emptyStreams = () => ({
     audioOriginal: null,
     audioCandidates: [],
     videoCandidates: [],
-    videoFormats: [],
-    audioFormats: [],
-    capturedVideoFormats: [],
-    formatFileId: '',
-    formatsFetchedAt: 0,
-    activeFileId: '',
     playbackStarted: false,
     filename: 'gdrive-video',
     timestamp: null
@@ -52,8 +39,15 @@ function getStreamBytes(url) {
 }
 
 function getBestAudioURL(streams) {
-    if (streams?.audio) return streams.audio;
-    return Array.isArray(streams?.audioCandidates) ? streams.audioCandidates.find(Boolean) || null : null;
+    const candidates = streams?.audioCandidates?.length
+        ? streams.audioCandidates
+        : streams?.audio
+            ? [streams.audioOriginal || streams.audio]
+            : [];
+    return candidates.reduce(
+        (best, url) => getStreamBytes(url) > getStreamBytes(best) ? url : best,
+        null
+    );
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -73,16 +67,18 @@ const setBadge = text => {
     } catch (_) {}
 };
 
-// Intentionally issue a second request for the same source stream while the
-// real download starts. The warm-up data is discarded and its request is
-// aborted after 10 seconds (or sooner when the job ends).
+// Drive-specific speed optimization: start a short-lived duplicate fetch for
+// each source while the real offscreen download starts. The warm-up data is
+// discarded and the requests are aborted after 10 seconds or when the job ends.
 const activeStreamWarmups = new Map();
 
 function startStreamWarmup(jobId, label, url, durationMs = 10000) {
     if (!jobId || !url) return;
+
     const key = `${jobId}:${label}`;
     const controller = new AbortController();
     activeStreamWarmups.set(key, controller);
+
     const timer = setTimeout(() => controller.abort(), durationMs);
     fetch(url, {
         credentials: 'include',
@@ -99,7 +95,9 @@ function startStreamWarmup(jobId, label, url, durationMs = 10000) {
                 try { await reader.cancel(); } catch (_) {}
             }
         })();
-    }).catch(() => {}).finally(() => {
+    }).catch(() => {
+        // Warm-up is an optimization; failures must not affect the real download.
+    }).finally(() => {
         clearTimeout(timer);
         activeStreamWarmups.delete(key);
     });
@@ -219,21 +217,16 @@ async function closeVideoOffscreen() {
     try { await chrome.offscreen.closeDocument(); } catch (_) {}
 }
 
-async function createVideoStageJob(tabId, filename, videoUrls, audioUrls, videoBytes, audioBytes, resolution) {
+async function createVideoStageJob(tabId, filename, videoUrl, audioUrl, videoBytes, audioBytes) {
     const jobId = `gdrive-video-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const videos = uniqueUrls(videoUrls);
-    const audios = uniqueUrls(audioUrls);
     await queueJobMutation(jobs => {
         jobs[jobId] = {
             sourceTabId: Number.isInteger(tabId) ? tabId : null,
             filename,
-            videoUrl: videos[0] || '',
-            audioUrl: audios[0] || '',
-            videoUrls: videos,
-            audioUrls: audios,
+            videoUrl,
+            audioUrl,
             videoBytes,
             audioBytes,
-            resolution: String(resolution || ''),
             createdAt: Date.now()
         };
     });
@@ -246,292 +239,60 @@ async function removeVideoStageJob(jobId) {
     });
 }
 
-function getVideoResolution(url, fallback = '') {
-    const supplied = String(fallback || '').trim();
-    if (/^\d{3,4}p$/i.test(supplied)) return supplied.toLowerCase();
-    if (/^(?:hd)?\d{3,4}$/i.test(supplied)) return `${supplied.match(/\d{3,4}/)[0]}p`;
-    if (!url) return '';
-
-    // Google Drive videoplayback URLs do not consistently expose the
-    // resolution as a width/height query parameter. The selected stream
-    // commonly carries a format id (itag), so use known video mappings as
-    // the strongest URL-based fallback.
-    const itagHeights = {
-        18: 360, 22: 720, 34: 360, 35: 480, 37: 1080, 59: 480, 78: 480,
-        133: 240, 134: 360, 135: 480, 136: 720, 137: 1080,
-        243: 360, 244: 480, 247: 720, 248: 1080, 278: 144,
-        242: 240, 245: 480, 246: 480, 271: 1440, 308: 1440, 313: 2160, 315: 2160
-    };
-
-    try {
-        const parsed = new URL(url);
-        const params = parsed.searchParams;
-        const size = params.get('size') || params.get('resolution') || '';
-        const sizeMatch = size.match(/(?:^|x)(\d{3,4})$/i) || size.match(/^(\d{3,4})x/i);
-        if (sizeMatch) return `${sizeMatch[1]}p`;
-
-        for (const key of ['height', 'quality', 'res']) {
-            const value = params.get(key) || '';
-            const match = String(value).match(/(?:^|\D)(\d{3,4})p?(?:\D|$)/i);
-            const height = match ? Number(match[1]) : Number(value);
-            if (Number.isInteger(height) && height >= 144 && height <= 4320) return `${height}p`;
-        }
-
-        const itag = Number(params.get('itag'));
-        if (Number.isInteger(itag) && itagHeights[itag]) return `${itagHeights[itag]}p`;
-
-        const urlMatch = url.match(/(?:^|[?&_])(?:size|resolution|quality|height)[=:_-]?(?:\d{3,4}x)?(\d{3,4})p?(?:[&_]|$)/i);
-        if (urlMatch) return `${urlMatch[1]}p`;
-    } catch (_) {
-    }
-    return '';
-}
-
-
-const DRIVE_PLAYBACK_ENDPOINTS = [
-    'https://content-workspacevideo-pa.googleapis.com/v1/drive/media/{id}/playback',
-    'https://workspacevideo-pa.googleapis.com/v1/drive/media/{id}/playback'
-];
-const DRIVE_PLAYBACK_API_KEY = 'AIzaSyDVQw45DwoYh632gvsP5vPDqEKvb-Ywnb8';
-
-function normalizeQuality(value) {
-    const match = String(value || '').match(/(?:^|\D)(\d{3,4})p?/i);
-    return match ? `${Number(match[1])}p` : '';
-}
-
-function isVideoFormat(format) {
-    const meta = format?.transcodeMetadata || {};
-    const mime = String(meta.mimeType || format.mimeType || '').toLowerCase();
-    const hasVideoCodec = meta.videoCodecString && !/^none$/i.test(String(meta.videoCodecString));
-    return hasVideoCodec || mime.startsWith('video/') || Number(meta.height) > 0;
-}
-
-function isAudioFormat(format) {
-    const meta = format?.transcodeMetadata || {};
-    const mime = String(meta.mimeType || format.mimeType || '').toLowerCase();
-    const hasAudioCodec = meta.audioCodecString && !/^none$/i.test(String(meta.audioCodecString));
-    return hasAudioCodec || mime.startsWith('audio/');
-}
-
-function parsePlaybackFormats(data) {
-    const formatData = data?.mediaStreamingData?.formatStreamingData || {};
-    const rawFormats = [
-        ...(Array.isArray(formatData.adaptiveTranscodes) ? formatData.adaptiveTranscodes : []),
-        ...(Array.isArray(formatData.progressiveTranscodes) ? formatData.progressiveTranscodes : [])
-    ];
-    const videos = [];
-    const audios = [];
-    const videoByQuality = new Map();
-
-    for (const format of rawFormats) {
-        if (!format?.url) continue;
-        const meta = format.transcodeMetadata || {};
-        const width = Number(meta.width) || 0;
-        const height = Number(meta.height) || 0;
-        const bytes = Number(meta.contentLength) || getStreamBytes(format.url);
-        const mime = String(meta.mimeType || '').toLowerCase();
-        const itag = Number(format.itag) || 0;
-        const hasVideo = isVideoFormat(format);
-        const hasAudio = isAudioFormat(format);
-
-        if (hasVideo && height > 0) {
-            const quality = `${height}p`;
-            const item = {
-                url: format.url,
-                quality,
-                width,
-                height,
-                bytes,
-                itag,
-                mime,
-                hasAudio
-            };
-            const current = videoByQuality.get(quality);
-            const score = (hasAudio ? 0 : 1000000000000) + (mime === 'video/mp4' ? 1000000000 : 0) + bytes;
-            const currentScore = current?.score || -1;
-            if (score > currentScore) videoByQuality.set(quality, { ...item, score });
-        }
-
-        if (hasAudio && !hasVideo) {
-            audios.push({
-                url: format.url,
-                bytes,
-                itag,
-                mime,
-                codec: String(meta.audioCodecString || '')
-            });
-        }
-    }
-
-    return {
-        videos: [...videoByQuality.values()]
-            .sort((a, b) => b.height - a.height)
-            .map(({ score, ...item }) => item),
-        audios: audios.sort((a, b) => b.bytes - a.bytes)
-    };
-}
-
-async function fetchDrivePlaybackFormats(fileId) {
-    const id = String(fileId || '').trim();
-    if (!id) return { success: false, error: 'Drive file ID is missing.' };
-
-    let lastError = '';
-    for (const template of DRIVE_PLAYBACK_ENDPOINTS) {
-        const url = `${template.replace('{id}', encodeURIComponent(id))}?key=${encodeURIComponent(DRIVE_PLAYBACK_API_KEY)}`;
-        try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 4500);
-            const response = await fetch(url, {
-                credentials: 'include',
-                cache: 'no-store',
-                referrer: 'https://drive.google.com/',
-                referrerPolicy: 'strict-origin-when-cross-origin',
-                signal: controller.signal
-            });
-            clearTimeout(timer);
-            if (!response.ok) {
-                lastError = `Playback metadata request failed (${response.status}).`;
-                continue;
-            }
-            const data = await response.json();
-            const formats = parsePlaybackFormats(data);
-            if (formats.videos.length) return { success: true, ...formats };
-            lastError = 'Google Drive returned no downloadable video formats.';
-        } catch (error) {
-            lastError = error?.message || String(error);
-        }
-    }
-    return { success: false, error: lastError || 'Could not read Google Drive playback metadata.' };
-}
-
-async function refreshVideoFormats(fileId) {
-    const result = await fetchDrivePlaybackFormats(fileId);
-    if (!result.success) return result;
-    await queueStreamMutation(streams => {
-        if (streams.activeFileId && streams.activeFileId !== String(fileId)) return false;
-        if (streams.formatFileId === String(fileId) && streams.formatsFetchedAt &&
-            Date.now() - streams.formatsFetchedAt < 15000 && streams.videoFormats?.length) {
-            return false;
-        }
-        streams.videoFormats = result.videos;
-        streams.audioFormats = result.audios;
-        streams.formatFileId = String(fileId);
-        streams.formatsFetchedAt = Date.now();
-        return true;
-    });
-    return result;
-}
-
-function getBestVideoFormat(streams, requestedResolution = '') {
-    const formats = Array.isArray(streams?.videoFormats) ? streams.videoFormats : [];
-    if (!formats.length) return null;
-    const requested = normalizeQuality(requestedResolution);
-    return requested ? formats.find(format => format.quality === requested) || null : formats[0];
-}
-
-function uniqueUrls(urls) {
-    return [...new Set((Array.isArray(urls) ? urls : [urls]).filter(Boolean).map(String))];
-}
-
-function getCapturedVideoUrls(streams, requestedResolution = '') {
-    const requested = normalizeQuality(requestedResolution);
-    const capturedFormats = Array.isArray(streams?.capturedVideoFormats) ? streams.capturedVideoFormats : [];
-    const matching = requested
-        ? capturedFormats.filter(format => normalizeQuality(format?.quality) === requested).map(format => format.url)
-        : [];
-    const generic = requested
-        ? (Array.isArray(streams?.videoCandidates) ? streams.videoCandidates.filter(url => getVideoResolution(url) === requested) : [])
-        : [];
-    return uniqueUrls([
-        ...matching,
-        ...generic,
-        ...(requested ? [] : [streams?.video]),
-        ...(Array.isArray(streams?.videoCandidates) ? streams.videoCandidates : [])
-    ]);
-}
-
-function getBestAudioFromFormats(streams) {
-    const format = Array.isArray(streams?.audioFormats) ? streams.audioFormats[0] : null;
-    return format?.url || null;
-}
-
-async function startVideoDownload(tabId, streams, requestedFilename = "", requestedResolution = "", fileId = "") {
+async function startVideoDownload(tabId, streams, requestedFilename = "") {
     let current = streams || {};
-
-    if (fileId && (!current.videoFormats?.length || current.formatFileId !== String(fileId))) {
-        const refreshed = await refreshVideoFormats(fileId);
-        if (refreshed.success) current = await getStoredStreams();
-    }
-
-    const selectedFormat = getBestVideoFormat(current, requestedResolution);
-    const capturedVideoUrls = getCapturedVideoUrls(current, requestedResolution);
-    const videoUrls = uniqueUrls([
-        ...capturedVideoUrls,
-        selectedFormat?.url
-    ]);
-
-    if (requestedResolution && !selectedFormat && !capturedVideoUrls.length) {
+    const candidates = Array.isArray(current.videoCandidates) && current.videoCandidates.length
+        ? current.videoCandidates
+        : (current.video ? [current.video] : []);
+    if (!candidates.length) {
         return {
             success: false,
-            error: `The selected ${normalizeQuality(requestedResolution)} stream is not currently available. Refresh the Drive video and try again.`
+            error: "No video captured. Play the video first."
         };
     }
-    if (!videoUrls.length) {
-        return {
-            success: false,
-            error: "No video stream is available yet. Refresh the Drive video and try again."
-        };
-    }
-
     current = await waitForAudioStream(current);
-    const audioUrls = uniqueUrls([
-        ...(Array.isArray(current.audioCandidates) ? current.audioCandidates : []),
-        current.audio,
-        getBestAudioFromFormats(current)
-    ]);
-    if (!audioUrls.length) {
+    const audioOriginal = getBestAudioURL(current);
+    if (!audioOriginal) {
         return {
             success: false,
-            error: "No audio stream is available yet. Refresh the Drive video and try again."
+            error: "Audio stream was not captured yet. Keep the video playing for a moment and try again."
         };
     }
-
-    const videoBytes = Number(selectedFormat?.bytes) || getStreamBytes(videoUrls[0]);
-    const audioBytes = getStreamBytes(audioUrls[0]) || Number(current.audioFormats?.[0]?.bytes) || 0;
-    const resolution = selectedFormat?.quality || getVideoResolution(videoUrls[0]) || requestedResolution || '';
+    const videoOriginal = current.videoOriginal || candidates[0];
+    const videoFetchURL = cleanURL(videoOriginal);
+    const audioFetchURL = cleanURL(audioOriginal);
+    const videoBytes = getStreamBytes(videoOriginal);
+    const audioBytes = getStreamBytes(audioOriginal);
     const finalFilename = sanitizeVideoFilename(
         requestedFilename || current.filename || "gdrive-video"
     );
     const jobId = await createVideoStageJob(
         tabId,
         finalFilename,
-        videoUrls,
-        audioUrls,
+        videoFetchURL,
+        audioFetchURL,
         videoBytes,
-        audioBytes,
-        resolution
+        audioBytes
     );
     try {
-        await sendTab(tabId, { type: 'videoStagePreload', jobId, videoBytes, audioBytes, resolution });
+        await sendTab(tabId, { type: 'videoStagePreload', jobId, videoBytes, audioBytes });
         await ensureVideoOffscreen();
-        await sendTab(tabId, { type: 'videoStageStarted', jobId, videoBytes, audioBytes, resolution });
+        await sendTab(tabId, { type: 'videoStageStarted', jobId, videoBytes, audioBytes });
 
-        // Start the duplicate warm-up against the same underlying video/audio
-        // streams. These requests are deliberately independent of the real
-        // downloader and their data is discarded.
-        startStreamWarmup(jobId, 'video', videoUrls[0] || '');
-        startStreamWarmup(jobId, 'audio', audioUrls[0] || '');
-
+        // Intentionally duplicate the requests: the warm-ups prime Drive's
+        // serving path while the real downloads retain the actual data.
+        startStreamWarmup(jobId, 'video', videoOriginal);
+        startStreamWarmup(jobId, 'audio', audioOriginal);
         sendOffscreen({ type: 'videoStageStart', jobId });
         return {
             success: true,
             staging: true,
             jobId,
             videoBytes,
-            audioBytes,
-            resolution
+            audioBytes
         };
     } catch (error) {
+        stopStreamWarmups(jobId);
         await removeVideoStageJob(jobId);
         return {
             success: false,
@@ -539,7 +300,6 @@ async function startVideoDownload(tabId, streams, requestedFilename = "", reques
         };
     }
 }
-
 chrome.webRequest.onBeforeRequest.addListener(details => {
     const url = details.url;
     const hasMimeVideo = url.includes('mime=video');
@@ -552,42 +312,33 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
 
         if (hasMimeVideo || isGenericVideo) {
             const candidates = Array.isArray(streams.videoCandidates) ? streams.videoCandidates : [];
-            streams.video = cleaned;
-            streams.videoOriginal = url;
-            streams.videoCandidates = [
-                cleaned,
-                ...candidates.filter(item => item && item !== cleaned)
-            ].slice(0, 8);
-
-            const quality = getVideoResolution(url);
-            if (quality) {
-                const formats = Array.isArray(streams.capturedVideoFormats) ? streams.capturedVideoFormats : [];
-                const bytes = getStreamBytes(url);
-                streams.capturedVideoFormats = [
-                    {
-                        url: cleaned,
-                        quality,
-                        bytes,
-                        height: Number(quality.replace('p', '')) || 0,
-                        itag: Number(new URL(url).searchParams.get('itag')) || 0,
-                        capturedAt: timestamp
-                    },
-                    ...formats.filter(item => item?.quality !== quality)
-                ].sort((a, b) => b.height - a.height).slice(0, 8);
+            if (streams.video !== cleaned) {
+                streams.video = cleaned;
+                streams.videoOriginal = url;
+                streams.videoCandidates = [
+                    cleaned,
+                    ...candidates.filter(item => item && item !== cleaned)
+                ].slice(0, 6);
+                changed = true;
+            } else if (!streams.videoOriginal) {
+                streams.videoOriginal = url;
+                changed = true;
             }
-            changed = true;
             streams.playbackStarted = true;
         }
 
         if (hasMimeAudio) {
             const candidates = Array.isArray(streams.audioCandidates) ? streams.audioCandidates : [];
-            streams.audio = cleaned;
-            streams.audioOriginal = url;
-            streams.audioCandidates = [
-                cleaned,
-                ...candidates.filter(item => item && item !== cleaned)
-            ].slice(0, 8);
-            changed = true;
+            if (!candidates.includes(cleaned)) {
+                streams.audioCandidates = [cleaned, ...candidates.filter(item => item)].slice(0, 8);
+                streams.audio = cleaned;
+                streams.audioOriginal = url;
+                changed = true;
+            } else if (!streams.audioOriginal) {
+                streams.audioOriginal = url;
+                streams.audio = cleaned;
+                changed = true;
+            }
         }
 
         if (changed) {
@@ -762,9 +513,7 @@ async function handleRuntimeMessage(request, sender) {
 
     if (action === 'clearVideoStream' || action === 'clearStreams') {
         setBadge('');
-        const streams = emptyStreams();
-        streams.activeFileId = String(request.fileId || '');
-        await replaceStoredStreams(streams);
+        await replaceStoredStreams(emptyStreams());
         return { success: true };
     }
 
@@ -779,58 +528,21 @@ async function handleRuntimeMessage(request, sender) {
     }
 
     if (action === 'videoPlaybackStarted') {
-        const fileId = String(request.fileId || '').trim();
         await queueStreamMutation(streams => {
-            let changed = false;
-            if (fileId && streams.activeFileId !== fileId) {
-                streams.activeFileId = fileId;
-                streams.formatFileId = '';
-                streams.formatsFetchedAt = 0;
-                streams.videoFormats = [];
-                streams.audioFormats = [];
-                streams.capturedVideoFormats = [];
-                changed = true;
-            }
-            if (!streams.playbackStarted) {
-                streams.playbackStarted = true;
-                streams.timestamp = Date.now();
-                changed = true;
-            }
-            return changed;
+            if (streams.playbackStarted) return false;
+            streams.playbackStarted = true;
+            streams.timestamp = Date.now();
+            return true;
         });
-        if (fileId) refreshVideoFormats(fileId).catch(() => {});
         return { success: true };
     }
 
     if (action === 'getStreams') return { streams: await getStoredStreams() };
 
-    if (action === 'getVideoFormats') {
-        const fileId = String(request.fileId || '').trim();
-        if (!fileId) return { success: false, error: 'Drive file ID is missing.' };
-        const streams = await getStoredStreams();
-        const fresh = streams.formatFileId === fileId &&
-            streams.formatsFetchedAt && Date.now() - streams.formatsFetchedAt < 10000;
-        if (fresh && streams.videoFormats?.length) {
-            return { success: true, videos: streams.videoFormats, audios: streams.audioFormats || [] };
-        }
-        const refreshed = await refreshVideoFormats(fileId);
-        if (refreshed.success) return refreshed;
-        if (streams.formatFileId === fileId && streams.videoFormats?.length) {
-            return { success: true, videos: streams.videoFormats, audios: streams.audioFormats || [], stale: true };
-        }
-        return refreshed;
-    }
-
     if (action === 'downloadVideo') {
-        let streams = await getStoredStreams();
+        const streams = await getStoredStreams();
         const tabId = Number.isInteger(request.tabId) ? request.tabId : sender?.tab?.id;
-        return startVideoDownload(
-            tabId,
-            streams,
-            request.filename || streams.filename || '',
-            request.resolution || '',
-            request.fileId || ''
-        );
+        return startVideoDownload(tabId, streams, request.filename || streams.filename || '');
     }
 
     if (request.type === 'getVideoStageJob') {
@@ -844,7 +556,7 @@ async function handleRuntimeMessage(request, sender) {
         const job = jobs[request.jobId];
 
         if (job?.sourceTabId != null && request.type !== 'videoStageCancel') {
-            await sendTab(job.sourceTabId, { type: request.type, ...request, resolution: request.resolution || job.resolution || '' });
+            await sendTab(job.sourceTabId, { type: request.type, ...request });
         }
 
         if (request.type === 'videoStageCancel') {
