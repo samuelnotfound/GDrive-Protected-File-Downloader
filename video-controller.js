@@ -12,6 +12,12 @@
     const PROTECTED_VIDEO_MENU_ID = app.ids.videoMenu;
     const videoOverlay = window.GDriveVideoOverlay;
     if (!videoOverlay) throw new Error('Video overlay module failed to load.');
+    video.availableFormats = video.availableFormats || [];
+    video.lastStreams = video.lastStreams || {};
+    video.selectedQuality = video.selectedQuality || '';
+    let qualityProbeInFlight = null;
+    let qualityProbeRetryTimer = null;
+    let qualityProbeAttempts = 0;
 
     // Video detection and menu integration
     
@@ -54,6 +60,150 @@
         }
         return '';
     }
+
+    function getCurrentDriveFileId() {
+        try {
+            const info = document.querySelector('#drive-active-item-info');
+            if (info?.textContent) {
+                const data = JSON.parse(info.textContent);
+                const id = data?.id || data?.fileId || data?.file_id;
+                if (id) return String(id);
+            }
+        } catch (_) {}
+        const match = location.pathname.match(/\/file\/d\/([A-Za-z0-9_-]+)/);
+        return match ? match[1] : '';
+    }
+
+    const ITAG_HEIGHTS = {
+        17: 144, 18: 360, 22: 720, 37: 1080, 38: 3072,
+        133: 240, 134: 360, 135: 480, 136: 720, 137: 1080,
+        160: 144, 242: 240, 243: 360, 244: 480, 247: 720,
+        248: 1080, 278: 144, 264: 144, 266: 240, 302: 720,
+        303: 1080, 308: 1440, 313: 2160, 315: 2160,
+        394: 144, 395: 240, 396: 360, 397: 480, 398: 720,
+        399: 1080, 400: 1440, 401: 2160, 402: 2880, 403: 4320
+    };
+
+    function qualityFromStreamUrl(url) {
+        if (!url) return '';
+        try {
+            const params = new URL(url).searchParams;
+            for (const key of ['size', 'resolution']) {
+                const value = params.get(key) || '';
+                const match = value.match(/(?:x)?(\d{3,4})p?$/i) || value.match(/(?:^|x)(\d{3,4})(?:p|$)/i);
+                if (match) return `${Number(match[1])}p`;
+            }
+            for (const key of ['height', 'quality', 'res']) {
+                const value = params.get(key) || '';
+                const match = String(value).match(/(?:^|\D)(\d{3,4})p?(?:\D|$)/i);
+                const height = match ? Number(match[1]) : Number(value);
+                if (Number.isInteger(height) && height >= 144 && height <= 4320) return `${height}p`;
+            }
+            const itag = Number(params.get('itag'));
+            if (ITAG_HEIGHTS[itag]) return `${ITAG_HEIGHTS[itag]}p`;
+        } catch (_) {}
+        return '';
+    }
+
+    function qualityOptionsFromCapturedStreams(streams = {}) {
+        const urls = [
+            streams.video, streams.videoOriginal,
+            ...(Array.isArray(streams.videoCandidates) ? streams.videoCandidates : [])
+        ].filter(Boolean);
+        const qualities = [...new Set(urls.map(qualityFromStreamUrl).filter(Boolean))];
+        return qualityOptionsFromFormats(qualities.map(quality => ({ quality, height: Number(quality.replace('p', '')) })));
+    }
+
+    function qualityOptionsFromFormats(formats = []) {
+        const seen = new Set();
+        return formats
+            .filter(format => format?.quality)
+            .sort((a, b) => Number(b.height || String(b.quality).replace('p', '')) - Number(a.height || String(a.quality).replace('p', '')))
+            .filter(format => !seen.has(format.quality) && seen.add(format.quality))
+            .map(format => ({ label: format.quality, value: format.quality }));
+    }
+
+    async function getAvailableVideoQualities() {
+        const fileId = getCurrentDriveFileId();
+        if (!fileId) return [];
+
+        try {
+            const result = await new Promise(resolve => {
+                chrome.runtime.sendMessage({ action: 'getVideoFormats', fileId }, response => {
+                    if (chrome.runtime.lastError) return resolve({ success: false });
+                    resolve(response || { success: false });
+                });
+            });
+            if (result?.success && Array.isArray(result.videos) && result.videos.length) {
+                video.availableFormats = result.videos;
+                return qualityOptionsFromFormats(video.availableFormats);
+            }
+        } catch (_) {}
+
+        try {
+            const local = await new Promise(resolve => {
+                chrome.storage.local.get({ capturedStreams: {} }, result => resolve(result?.capturedStreams || {}));
+            });
+            if (local.activeFileId && local.activeFileId !== fileId) return [];
+            video.lastStreams = local;
+            video.availableFormats = Array.isArray(local.videoFormats) ? local.videoFormats : video.availableFormats || [];
+            return video.availableFormats.length
+                ? qualityOptionsFromFormats(video.availableFormats)
+                : qualityOptionsFromCapturedStreams(local);
+        } catch (_) {}
+        return qualityOptionsFromCapturedStreams(video.lastStreams);
+    }
+
+    function bindVideoQualityPicker(item) {
+        const select = app.ui.addDownloadQualityPicker(item);
+        if (select && !select.dataset.videoQualityBound) {
+            select.dataset.videoQualityBound = 'true';
+            select.addEventListener('change', event => {
+                video.selectedQuality = event.target.value || '';
+            });
+        }
+        return select;
+    }
+
+    function updateVideoQualityPickers(options) {
+        const items = document.querySelectorAll('#' + PROTECTED_VIDEO_MENU_ID);
+        items.forEach(item => {
+            bindVideoQualityPicker(item);
+            const selected = app.ui.setDownloadQualityOptions(item, options, video.selectedQuality);
+            if (selected && selected !== video.selectedQuality) video.selectedQuality = selected;
+        });
+    }
+
+    function retryQualityProbe(delay = 900) {
+        if (qualityProbeRetryTimer || qualityProbeAttempts >= 6) return;
+        qualityProbeRetryTimer = setTimeout(() => {
+            qualityProbeRetryTimer = null;
+            probeAvailableVideoQualities();
+        }, delay);
+    }
+
+    async function probeAvailableVideoQualities() {
+        if (qualityProbeInFlight) return qualityProbeInFlight;
+        if (!getCurrentDriveFileId()) return [];
+        qualityProbeInFlight = (async () => {
+            try {
+                qualityProbeAttempts++;
+                const options = await getAvailableVideoQualities();
+                if (options.length) qualityProbeAttempts = 0;
+                if (options.length) {
+                    updateVideoQualityPickers(options);
+                } else if (video.lastViewerState || video.streamDetected) {
+                    retryQualityProbe(1200);
+                }
+                updateVideoMenuState();
+                return options;
+            } finally {
+                qualityProbeInFlight = null;
+            }
+        })();
+        return qualityProbeInFlight;
+    }
+
     function updateCapturedVideoFilename() {
         const name = getCurrentDriveFileName();
         if (!name || name === video.lastFilenameSent) return name;
@@ -84,11 +234,43 @@
     function hasMainPagePlaybackStarted() {
         return collectVideoElements().some(video => isVisibleVideoElement(video) && !video.paused && !video.ended && (video.currentTime > 0 || video.readyState >= 3));
     }
+    function getQualityFromDriveUI() {
+        const resolutionPattern = /\b(2160|1440|1080|720|480|360|240|144)p\b/i;
+        const selectors = [
+            '[role="menuitemradio"][aria-checked="true"]',
+            '[role="option"][aria-selected="true"]',
+            '[aria-current="true"]',
+            '[aria-label*="p"]',
+            '[data-tooltip*="p"]'
+        ];
+        const viewer = document.querySelector('section[aria-label="Video Player"]') || document;
+        for (const selector of selectors) {
+            for (const el of viewer.querySelectorAll(selector)) {
+                const text = [el.getAttribute('aria-label'), el.getAttribute('data-tooltip'), el.textContent]
+                    .filter(Boolean).join(' ');
+                const match = text.match(resolutionPattern);
+                if (match) return match[1] + 'p';
+            }
+        }
+        return '';
+    }
+
+    function getCurrentVideoResolution() {
+        const uiQuality = getQualityFromDriveUI();
+        if (uiQuality) return uiQuality;
+        const all = collectVideoElements().filter(v => Number(v.videoHeight) > 0 && Number(v.videoWidth) > 0);
+        const videos = all.filter(isVisibleVideoElement);
+        const active = (videos.length ? videos : all)
+            .sort((a, b) => (Number(b.videoWidth) * Number(b.videoHeight)) - (Number(a.videoWidth) * Number(a.videoHeight)))[0];
+        const height = Number(active?.videoHeight) || 0;
+        return height ? `${height}p` : '';
+    }
     function setVideoPlaybackStarted(started = true) {
         if (!started || video.playbackStarted) return;
         video.playbackStarted = true;
         updateVideoMenuState();
-        app.sendAction("videoPlaybackStarted");
+        app.sendAction('videoPlaybackStarted', { fileId: getCurrentDriveFileId() });
+        probeAvailableVideoQualities();
     }
     function updateVideoMenuState() {
         const items = document.querySelectorAll('#' + PROTECTED_VIDEO_MENU_ID);
@@ -96,19 +278,21 @@
             const label = item.querySelector('.psd-video-menu-label');
             const info = item.querySelector('.psd-video-menu-info');
             const busy = !!video.downloadInProgress;
-            const labelText = busy  ? 'Downloading Video…': 'Download Video';
+            const labelText = busy ? 'Downloading…' : 'Download';
             if (label) label.textContent = labelText;
             item.setAttribute('aria-label', labelText);
-            item.dataset.streamReady = video.streamDetected  ? 'true': 'false';
-            item.dataset.playbackReady = video.playbackStarted  ? 'true': 'false';
-            if (busy) {
+            item.removeAttribute('aria-haspopup');
+            item.dataset.streamReady = video.streamDetected ? 'true' : 'false';
+            item.dataset.playbackReady = video.playbackStarted ? 'true' : 'false';
+            const ready = (video.playbackStarted || video.streamDetected || video.availableFormats.length > 0) && !busy;
+            if (busy || !ready) {
                 item.setAttribute('aria-disabled', 'true');
                 item.setAttribute('disabled', 'true');
                 item.style.cursor = 'default';
                 item.style.opacity = '.55';
                 item.style.pointerEvents = 'none';
-                item.tabIndex = - 1;
-            }else {
+                item.tabIndex = -1;
+            } else {
                 item.removeAttribute('aria-disabled');
                 item.removeAttribute('disabled');
                 item.style.cursor = 'pointer';
@@ -116,7 +300,8 @@
                 item.style.pointerEvents = 'auto';
                 item.tabIndex = 0;
             }
-            if (info) info.textContent = busy  ? 'Video download is in progress…': 'This option uses an alternative method to download the video when the usual download option is unavailable.';
+            app.ui.setDownloadQualityDisabled(item, busy || !ready);
+            if (info) info.textContent = 'GDrive Protected File Downloader';
         });
     }
     function setVideoDownloadState(hasStream) {
@@ -124,8 +309,11 @@
         updateVideoMenuState();
     }
     function syncVideoStreamState(streams = {}) {
+        video.lastStreams = streams;
         if (streams.playbackStarted || streams.video) video.playbackStarted = true;
-        setVideoDownloadState(!!streams.video);
+        video.availableFormats = Array.isArray(streams.videoFormats) ? streams.videoFormats : video.availableFormats || [];
+        if (video.availableFormats.length) updateVideoQualityPickers(qualityOptionsFromFormats(video.availableFormats));
+        setVideoDownloadState(!!streams.video || video.availableFormats.length > 0);
     }
 
     async function tryDirectVideoPlayback(videos) {
@@ -182,11 +370,20 @@
             };
         }
     }
+    async function waitForVideoResolution(maxWait = 1200) {
+        const end = Date.now() + maxWait;
+        do {
+            const resolution = getCurrentVideoResolution();
+            if (resolution) return resolution;
+            await app.sleep(100);
+        } while (Date.now() < end);
+        return '';
+    }
     async function startCurrentVideoAndWait() {
         let videos = [];
         try {
             videos = collectVideoElements();
-            videos.forEach(muteVideo);
+            videos.forEach(app.muteVideo);
             const directResult = await tryDirectVideoPlayback(videos);
             if (directResult) return directResult;
         } catch (error) {
@@ -205,7 +402,7 @@
             };
         }
         try {
-            collectVideoElements().forEach(muteVideo);
+            collectVideoElements().forEach(app.muteVideo);
         } catch (_) {
         }
         setVideoPlaybackStarted();
@@ -213,75 +410,53 @@
             success: true
         };
     }
-    async function startVideoFromMenu() {
-        if (video.downloadInProgress) return;
+    async function beginVideoDownload(quality) {
+        if (video.downloadInProgress || !quality) return;
         video.downloadInProgress = true;
         updateVideoMenuState();
         const filename = getCurrentDriveFileName();
+        const fileId = getCurrentDriveFileId();
         videoOverlay.show(true);
         try {
             app.ui.closeDriveFileMenu();
-            const playback = await startCurrentVideoAndWait();
-            if (!playback.success) {
-                videoOverlay.update({
-                    stage: 'error', message: playback.error || 'The video did not start playing.'
+            const response = await new Promise(resolve => {
+                chrome.runtime.sendMessage({
+                    action: 'downloadVideo',
+                    filename: filename || undefined,
+                    resolution: quality,
+                    fileId: fileId || undefined
+                }, result => {
+                    if (chrome.runtime.lastError) return resolve({ success: false, error: chrome.runtime.lastError.message });
+                    resolve(result || { success: false, error: 'Video download did not start.' });
                 });
-                const root = document.getElementById('psd-video-progress-overlay');
-                root?.classList.add('error');
+            });
+            if (!response.success) {
                 video.downloadInProgress = false;
                 updateVideoMenuState();
-                return;
+                videoOverlay.update({ stage: 'error', message: response.error || 'Video processing failed.' });
             }
-            chrome.runtime.sendMessage({
-                action: 'downloadVideo', filename: filename || undefined
-            }, response => {
-                if (chrome.runtime.lastError) {
-                    videoOverlay.update({
-                        stage: 'error', message: chrome.runtime.lastError.message
-                    });
-                    return;
-                }
-                if (response && !response.success) {
-                    video.downloadInProgress = false;
-                    updateVideoMenuState();
-                    videoOverlay.update({
-                        stage: 'error', message: response.error || 'Video processing failed.'
-                    });
-                    return;
-                }
-                updateVideoMenuState();
-            });
-        }catch (error) {
+        } catch (error) {
             video.downloadInProgress = false;
             updateVideoMenuState();
-            videoOverlay.update({
-                stage: 'error', message: error?.message || String(error)
-            });
+            videoOverlay.update({ stage: 'error', message: error?.message || String(error) });
         }
     }
-    function installVideoMenuClickGuard() {
-        if (window.__PSD_VIDEO_MENU_CLICK_GUARD) return;
-        window.__PSD_VIDEO_MENU_CLICK_GUARD = true;
-        const activate = (item, event) => {
+
+    function installVideoMenuHandler() {
+        if (window.__PSD_VIDEO_MENU_HANDLER) return;
+        window.__PSD_VIDEO_MENU_HANDLER = true;
+        document.addEventListener('click', event => {
+            const item = event.target?.closest?.('#' + PROTECTED_VIDEO_MENU_ID);
             if (!item || video.downloadInProgress) return;
+            if (event.target?.closest?.('.psd-quality-select')) return;
             event.preventDefault();
-            event.stopImmediatePropagation();
             event.stopPropagation();
-            item.dataset.activationInProgress = 'true';
-            setTimeout(() => {
-                item.dataset.activationInProgress = 'false';
-            }, 1800);
-            startVideoFromMenu();
-        };
-        document.addEventListener('pointerdown', e => {
-            const item = e.target?.closest?.('#' + PROTECTED_VIDEO_MENU_ID);
-            if (item) activate(item, e);
-        }, true);
-        document.addEventListener('click', e => {
-            const item = e.target?.closest?.('#' + PROTECTED_VIDEO_MENU_ID);
-            if (item && item.dataset.activationInProgress !== 'true') activate(item, e);
+            const quality = app.ui.getDownloadQuality(item) || video.selectedQuality;
+            if (quality) beginVideoDownload(quality);
+            else probeAvailableVideoQualities();
         }, true);
     }
+
     function installStreamStorageListener() {
         if (window.__PSD_STREAM_STORAGE_LISTENER) return;
         window.__PSD_STREAM_STORAGE_LISTENER = true;
@@ -310,35 +485,41 @@
         const item = app.ui.makeStandaloneMenuRow(
             templateRow,
             PROTECTED_VIDEO_MENU_ID,
-            "Download Video"
+            "Download"
         );
         if (!item) return false;
 
         const label = item.querySelector('[jsname="K4r5Ff"]');
         if (label) {
             label.classList.add("psd-video-menu-label");
-            label.textContent = "Download Video";
+            label.textContent = "Download";
         } else {
             const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
             while (walker.nextNode()) {
                 const node = walker.currentNode;
                 if (app.ui.normalizeMenuText(node.nodeValue) === "Security limitations") {
-                    node.nodeValue = "Download Video";
+                    node.nodeValue = "Download";
                     break;
                 }
             }
         }
-        app.ui.addMenuDescription(item, "psd-video-menu-label", "psd-video-menu-info", "This option uses an alternative method to download the video when the usual download option is unavailable.");
+        app.ui.addMenuDescription(item, "psd-video-menu-label", "psd-video-menu-info", "GDrive Protected File Downloader");
+        bindVideoQualityPicker(item);
         app.ui.setDownloadMenuItemIcon(item);
         app.ui.styleDownloadMenuItem(item, "1");
         app.ui.handleMenuKeyboardActivation(item, event => {
+            if (event.target?.closest?.('.psd-quality-select')) return;
             event.preventDefault();
             event.stopPropagation();
-            item.click();
+            const quality = app.ui.getDownloadQuality(item) || video.selectedQuality;
+            if (quality) beginVideoDownload(quality);
         });
         const parent = securityRow.parentNode;
         const shareRow = app.ui.findShareRow(menu);
         app.ui.insertAfterReference(parent, item, shareRow || null);
+        const options = qualityOptionsFromFormats(video.availableFormats || []);
+        app.ui.setDownloadQualityOptions(item, options, video.selectedQuality);
+        updateVideoMenuState();
         return true;
     }
 
@@ -377,10 +558,16 @@
             if (open) {
                 video.streamDetected = false;
                 video.playbackStarted = false;
+                video.availableFormats = [];
+                video.lastStreams = {};
+                video.selectedQuality = '';
+                qualityProbeAttempts = 0;
+                if (qualityProbeRetryTimer) { clearTimeout(qualityProbeRetryTimer); qualityProbeRetryTimer = null; }
                 video.lastFilenameSent = '';
                 updateVideoMenuState();
-                app.sendAction('clearVideoStream');
+                app.sendAction('clearVideoStream', { fileId: getCurrentDriveFileId() });
                 updateCapturedVideoFilename();
+                retryQualityProbe(250);
             }
             if (open) updateCapturedVideoFilename();
             video.lastViewerState = open;
@@ -399,7 +586,7 @@
                 const stage = videoOverlay.getStage();
                 if ((job && job !== msg.jobId && !['ready', 'cancelled', 'error'].includes(stage)) ||
                     (job === msg.jobId && stage !== 'download')) return;
-                return videoOverlay.show(true, msg.jobId || null, msg.videoBytes || 0, msg.audioBytes || 0);
+                return videoOverlay.show(true, msg.jobId || null, msg.videoBytes || 0, msg.audioBytes || 0, msg.resolution || '');
             }
             const activeJob = videoOverlay.getJobId();
             if (activeJob && msg.jobId && activeJob !== msg.jobId) return;
@@ -412,7 +599,7 @@
                     }
                     break;
                 case 'videoStageStarted':
-                    videoOverlay.setJob(msg.jobId || activeJob, msg.videoBytes || 0, msg.audioBytes || 0);
+                    videoOverlay.setJob(msg.jobId || activeJob, msg.videoBytes || 0, msg.audioBytes || 0, msg.resolution || '');
                     break;
                 case 'videoStageProgress':
                     videoOverlay.update({ label: msg.label, received: msg.received, total: msg.total });
@@ -441,7 +628,7 @@
         });
     }
     function init() {
-        installVideoMenuClickGuard();
+        installVideoMenuHandler();
         installStreamStorageListener();
         initMessaging();
         installFramePlaybackRelay();
