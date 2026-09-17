@@ -147,22 +147,22 @@
             if (local.activeFileId && local.activeFileId !== fileId) return [];
             video.lastStreams = local;
             video.availableFormats = Array.isArray(local.videoFormats) ? local.videoFormats : video.availableFormats || [];
-            return video.availableFormats.length
-                ? qualityOptionsFromFormats(video.availableFormats)
-                : qualityOptionsFromCapturedStreams(local);
+            if (video.availableFormats.length) return qualityOptionsFromFormats(video.availableFormats);
+            const inferred = qualityOptionsFromCapturedStreams(local);
+            if (inferred.length) video.streamDetected = true;
+            return inferred;
         } catch (_) {}
-        return qualityOptionsFromCapturedStreams(video.lastStreams);
+        const inferred = qualityOptionsFromCapturedStreams(video.lastStreams);
+        if (inferred.length) video.streamDetected = true;
+        return inferred;
     }
 
     function bindVideoQualityPicker(item) {
-        const select = app.ui.addDownloadQualityPicker(item);
-        if (select && !select.dataset.videoQualityBound) {
-            select.dataset.videoQualityBound = 'true';
-            select.addEventListener('change', event => {
-                video.selectedQuality = event.target.value || '';
-            });
-        }
-        return select;
+        app.ui.addDownloadQualityPicker(item);
+        item.__psdQualityOnChange = quality => {
+            video.selectedQuality = quality || '';
+        };
+        return item.__psdQualityPicker;
     }
 
     function updateVideoQualityPickers(options) {
@@ -443,19 +443,9 @@
     }
 
     function installVideoMenuHandler() {
-        if (window.__PSD_VIDEO_MENU_HANDLER) return;
-        window.__PSD_VIDEO_MENU_HANDLER = true;
-        document.addEventListener('click', event => {
-            const item = event.target?.closest?.('#' + PROTECTED_VIDEO_MENU_ID);
-            if (!item || video.downloadInProgress) return;
-            if (event.target?.closest?.('.psd-quality-select')) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const quality = app.ui.getDownloadQuality(item) || video.selectedQuality;
-            if (quality) beginVideoDownload(quality);
-            else probeAvailableVideoQualities();
-        }, true);
+        // Download rows install their own click handler when created.
     }
+
 
     function installStreamStorageListener() {
         if (window.__PSD_STREAM_STORAGE_LISTENER) return;
@@ -489,6 +479,10 @@
         );
         if (!item) return false;
 
+        // This row contains its own Quality control, so Drive must not treat it as a native menu action.
+        item.setAttribute('role', 'presentation');
+        item.setAttribute('data-psd-video-download-row', 'true');
+
         const label = item.querySelector('[jsname="K4r5Ff"]');
         if (label) {
             label.classList.add("psd-video-menu-label");
@@ -508,7 +502,7 @@
         app.ui.setDownloadMenuItemIcon(item);
         app.ui.styleDownloadMenuItem(item, "1");
         app.ui.handleMenuKeyboardActivation(item, event => {
-            if (event.target?.closest?.('.psd-quality-select')) return;
+            if (event.target?.closest?.('.psd-quality-picker')) return;
             event.preventDefault();
             event.stopPropagation();
             const quality = app.ui.getDownloadQuality(item) || video.selectedQuality;
@@ -517,8 +511,16 @@
         const parent = securityRow.parentNode;
         const shareRow = app.ui.findShareRow(menu);
         app.ui.insertAfterReference(parent, item, shareRow || null);
+        app.ui.addDownloadQualityPicker(item);
         const options = qualityOptionsFromFormats(video.availableFormats || []);
         app.ui.setDownloadQualityOptions(item, options, video.selectedQuality);
+        item.addEventListener('click', event => {
+            if (event.target?.closest?.('.psd-quality-picker')) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const quality = app.ui.getDownloadQuality(item) || video.selectedQuality;
+            if (quality) beginVideoDownload(quality);
+        });
         updateVideoMenuState();
         return true;
     }

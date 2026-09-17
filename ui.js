@@ -34,6 +34,18 @@
         videoMenu: 'psd-protected-video-menuitem'
     };
 
+    let openQualityPicker = null;
+    const closeOpenQualityPicker = () => {
+        const picker = openQualityPicker;
+        if (!picker?.isConnected) {
+            openQualityPicker = null;
+            return;
+        }
+        picker.querySelector('.psd-quality-dropdown')?.setAttribute('hidden', '');
+        picker.querySelector('.psd-quality-button')?.setAttribute('aria-expanded', 'false');
+        openQualityPicker = null;
+    };
+
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const sendAction = (action, data = {}) => {
         try {
@@ -334,134 +346,209 @@
 
     function addDownloadQualityPicker(item) {
         if (!item) return null;
-        const label = item.querySelector('[jsname="K4r5Ff"]');
-        const parent = label?.parentElement;
-        if (!parent) return null;
 
-        const existing = parent.querySelector('.psd-quality-picker');
-        if (existing) return existing.querySelector('.psd-quality-select');
-
-        const picker = document.createElement('div');
-        picker.className = 'psd-quality-picker';
-        picker.style.cssText = [
-            'display:flex',
-            'align-items:center',
-            'gap:7px',
-            'margin-top:5px',
-            'width:max-content',
-            'min-height:28px',
-            'font:400 14px/20px "Google Sans",Roboto,Arial,sans-serif',
-            'color:#bdc1c6',
-            'pointer-events:auto',
-            'position:relative',
-            'z-index:2'
-        ].join(';');
-
-        const text = document.createElement('span');
-        text.textContent = 'Quality:';
-        text.style.cssText = 'white-space:nowrap;pointer-events:none;color:#bdc1c6;';
-
-        const select = document.createElement('select');
-        select.className = 'psd-quality-select';
-        select.disabled = true;
-        select.title = 'Choose the video quality to download';
-        select.setAttribute('aria-label', 'Video quality');
-        select.style.cssText = [
-            'box-sizing:border-box',
-            'display:block',
-            'width:92px',
-            'height:30px',
-            'margin:0',
-            'padding:2px 8px',
-            'border:1px solid #747a80',
-            'border-radius:6px',
-            'background:#3c4043',
-            'color:#e8eaed',
-            'font:500 14px/22px "Google Sans",Roboto,Arial,sans-serif',
-            'color-scheme:dark',
-            'cursor:pointer',
-            'outline:none',
-            'position:relative',
-            'z-index:3',
-            'pointer-events:auto'
-        ].join(';');
-
-        const stopRowClick = event => event.stopPropagation();
-        for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick', 'keydown', 'keyup', 'change']) {
-            select.addEventListener(type, stopRowClick, true);
+        if (item.__psdQualityPicker) {
+            if (!item.__psdQualityPicker.isConnected && item.parentNode) {
+                item.parentNode.insertBefore(item.__psdQualityPicker, item.nextSibling);
+            }
+            return item.__psdQualityPicker;
         }
 
-        picker.append(text, select);
-        parent.appendChild(picker);
-        parent.style.gap = '0';
+        const row = document.createElement('div');
+        row.className = 'psd-quality-menu-row';
+        row.setAttribute('role', 'presentation');
+        row.innerHTML = `
+            <span class="psd-quality-label">Quality:</span>
+            <div class="psd-quality-control-wrap">
+                <button class="psd-quality-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose video quality">
+                    <span class="psd-quality-value">Detecting…</span>
+                    <svg class="psd-quality-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"></path></svg>
+                </button>
+                <div class="psd-quality-dropdown" role="listbox" hidden></div>
+            </div>`;
 
-        if (!document.getElementById('psd-quality-picker-style')) {
+        const button = row.querySelector('.psd-quality-button');
+        const valueNode = row.querySelector('.psd-quality-value');
+        const dropdown = row.querySelector('.psd-quality-dropdown');
+
+        const close = () => {
+            dropdown.hidden = true;
+            button.setAttribute('aria-expanded', 'false');
+            if (openQualityPicker === row) openQualityPicker = null;
+        };
+        const toggle = () => {
+            if (button.disabled || !dropdown.children.length) return;
+            if (openQualityPicker && openQualityPicker !== row) closeOpenQualityPicker();
+            const open = dropdown.hidden;
+            dropdown.hidden = !open;
+            button.setAttribute('aria-expanded', String(open));
+            openQualityPicker = open ? row : null;
+            if (open) row.closest('[role="menu"]')?.style.setProperty('overflow', 'visible', 'important');
+        };
+        const selectQuality = quality => {
+            const option = [...dropdown.querySelectorAll('.psd-quality-option')]
+                .find(node => node.dataset.quality === quality);
+            if (!option) return;
+            item.__psdQualityValue = quality;
+            button.dataset.quality = quality;
+            valueNode.textContent = option.dataset.label || option.textContent.trim();
+            item.__psdQualityOnChange?.(quality);
+            dropdown.querySelectorAll('.psd-quality-option').forEach(node => {
+                const selected = node === option;
+                node.classList.toggle('selected', selected);
+                node.setAttribute('aria-selected', String(selected));
+                node.tabIndex = selected ? 0 : -1;
+            });
+            close();
+        };
+
+        row.addEventListener('pointerdown', event => event.stopPropagation());
+        row.addEventListener('mousedown', event => event.stopPropagation());
+        row.addEventListener('click', event => event.stopPropagation());
+        row.addEventListener('keydown', event => event.stopPropagation());
+
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggle();
+        });
+        button.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                event.stopPropagation();
+                toggle();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+            }
+        });
+
+        dropdown.addEventListener('click', event => {
+            const option = event.target.closest('.psd-quality-option');
+            if (!option) return;
+            event.preventDefault();
+            event.stopPropagation();
+            selectQuality(option.dataset.quality || '');
+        });
+
+        row.__psdToggle = toggle;
+        row.__psdSelectQuality = selectQuality;
+        row.__psdClose = close;
+
+        const styleId = 'psd-quality-picker-style';
+        if (!document.getElementById(styleId)) {
             const style = document.createElement('style');
-            style.id = 'psd-quality-picker-style';
+            style.id = styleId;
             style.textContent = `
-#psd-protected-video-menuitem { overflow:visible !important; }
-#psd-protected-video-menuitem .psd-quality-picker { pointer-events:auto !important; }
-#psd-protected-video-menuitem .psd-quality-select:hover:not(:disabled) {
-    background:#45484b !important;
-    border-color:#9aa0a6 !important;
+.psd-quality-menu-row {
+    box-sizing:border-box; position:relative; z-index:20; width:100%; overflow:visible;
+    display:flex; align-items:center; gap:7px; min-height:42px; padding:5px 16px 10px 79px;
+    background:transparent; font-family:"Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    border-bottom:1px solid rgba(255,255,255,.10);
 }
-#psd-protected-video-menuitem .psd-quality-select:focus-visible {
-    border-color:#a8c7fa !important;
-    box-shadow:0 0 0 2px rgba(168,199,250,.22) !important;
+.psd-quality-menu-row .psd-quality-label {
+    color:#bdc1c6; font:500 13px/20px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    white-space:nowrap; user-select:none;
 }
-#psd-protected-video-menuitem .psd-quality-select:disabled {
-    color:#9aa0a6 !important;
-    border-color:#5f6368 !important;
-    cursor:default !important;
-    opacity:.8;
+.psd-quality-menu-row .psd-quality-control-wrap { position:relative; flex:none; }
+.psd-quality-menu-row .psd-quality-button {
+    box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; gap:8px;
+    width:88px; height:32px; padding:0 9px 0 11px; border:0; border-radius:8px;
+    background:#3c4043; color:#e8eaed; font:500 13px/20px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    cursor:pointer; outline:none; appearance:none; -webkit-appearance:none;
 }
+.psd-quality-menu-row .psd-quality-button:hover:not(:disabled) { background:#45484b; }
+.psd-quality-menu-row .psd-quality-button:focus-visible { box-shadow:0 0 0 2px rgba(168,199,250,.7); }
+.psd-quality-menu-row .psd-quality-button:disabled { color:#9aa0a6; background:#303134; cursor:default; opacity:.7; }
+.psd-quality-menu-row .psd-quality-value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.psd-quality-menu-row .psd-quality-arrow { width:15px; height:15px; flex:none; fill:#bdc1c6; pointer-events:none; }
+.psd-quality-menu-row .psd-quality-dropdown {
+    position:absolute; top:calc(100% + 6px); left:0; width:100px; max-height:180px; overflow:auto;
+    box-sizing:border-box; padding:4px; background:#2b2c2f; border:1px solid #45464a; border-radius:10px;
+    box-shadow:0 8px 24px rgba(0,0,0,.42),0 2px 6px rgba(0,0,0,.28); z-index:2147483647;
+}
+.psd-quality-menu-row .psd-quality-dropdown[hidden] { display:none !important; }
+.psd-quality-menu-row .psd-quality-option {
+    box-sizing:border-box; width:100%; min-height:32px; padding:0 7px 0 9px; border:0; border-radius:7px;
+    background:transparent; color:#e8eaed; display:flex; align-items:center; justify-content:space-between;
+    font:500 13px/18px "Google Sans","Google Sans Text",Roboto,Arial,sans-serif;
+    cursor:pointer; outline:none; text-align:left;
+}
+.psd-quality-menu-row .psd-quality-option:hover,
+.psd-quality-menu-row .psd-quality-option:focus-visible { background:#3c4043; }
+.psd-quality-menu-row .psd-quality-option.selected { color:#a8c7fa; }
+.psd-quality-menu-row .psd-quality-check { width:15px; height:15px; fill:currentColor; opacity:0; flex:none; pointer-events:none; }
+.psd-quality-menu-row .psd-quality-option.selected .psd-quality-check { opacity:1; }
 `;
             document.head.appendChild(style);
         }
 
-        return select;
+        item.__psdQualityPicker = row;
+        item.__psdQualityControl = button;
+        item.__psdQualityValue = '';
+        if (item.parentNode) item.parentNode.insertBefore(row, item.nextSibling);
+        return row;
     }
 
     function setDownloadQualityOptions(item, options = [], selectedValue = '') {
-        const select = addDownloadQualityPicker(item);
-        if (!select) return '';
+        const picker = addDownloadQualityPicker(item);
+        if (!picker) return '';
+        const button = item.__psdQualityControl;
+        const valueNode = picker.querySelector('.psd-quality-value');
+        const dropdown = picker.querySelector('.psd-quality-dropdown');
         const normalized = options
             .map(option => typeof option === 'string' ? { label: option, value: option } : option)
             .filter(option => option?.label && option?.value);
-        select.replaceChildren();
 
+        dropdown.replaceChildren();
         if (!normalized.length) {
-            const option = document.createElement('option');
-            option.value = '';
-            option.textContent = 'Detecting…';
-            select.appendChild(option);
-            select.disabled = true;
+            valueNode.textContent = 'Detecting…';
+            button.disabled = true;
+            button.dataset.quality = '';
+            item.__psdQualityValue = '';
             return '';
         }
 
-        for (const option of normalized) {
-            const node = document.createElement('option');
-            node.value = option.value;
-            node.textContent = option.label;
-            select.appendChild(node);
-        }
+        normalized.forEach(option => {
+            const node = document.createElement('button');
+            node.type = 'button';
+            node.className = 'psd-quality-option';
+            node.dataset.quality = option.value;
+            node.dataset.label = option.label;
+            node.setAttribute('role', 'option');
+            node.setAttribute('aria-selected', 'false');
+            node.tabIndex = -1;
+            node.innerHTML = `<span>${option.label}</span><svg class="psd-quality-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg>`;
+            dropdown.appendChild(node);
+        });
 
         const requested = selectedValue && normalized.some(option => option.value === selectedValue)
             ? selectedValue
             : normalized[0].value;
-        select.value = requested;
-        select.disabled = false;
-        return requested;
+        const selected = normalized.find(option => option.value === requested) || normalized[0];
+        item.__psdQualityValue = selected.value;
+        button.dataset.quality = selected.value;
+        valueNode.textContent = selected.label;
+        button.disabled = false;
+        dropdown.querySelectorAll('.psd-quality-option').forEach(node => {
+            const active = node.dataset.quality === selected.value;
+            node.classList.toggle('selected', active);
+            node.setAttribute('aria-selected', String(active));
+            node.tabIndex = active ? 0 : -1;
+        });
+        return selected.value;
     }
 
     function getDownloadQuality(item) {
-        return item?.querySelector('.psd-quality-select')?.value || '';
+        return item?.__psdQualityValue || '';
     }
 
     function setDownloadQualityDisabled(item, disabled) {
-        const select = item?.querySelector('.psd-quality-select');
-        if (select) select.disabled = !!disabled || !select.options.length || !select.value;
+        const button = item?.__psdQualityControl;
+        if (button) button.disabled = !!disabled || !item.__psdQualityValue;
     }
+
 
     app.sleep = sleep;
     app.sendAction = sendAction;
