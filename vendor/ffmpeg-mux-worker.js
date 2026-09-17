@@ -133,18 +133,13 @@ self.onmessage = async (event) => {
   if (data.type !== 'mux') return;
 
   try {
-    if (!(data.video instanceof Blob) || !(data.audio instanceof Blob)) {
+    if (!(data.video instanceof ArrayBuffer) || !(data.audio instanceof ArrayBuffer)) {
       throw new Error('FFmpeg did not receive the staged video and audio files.');
     }
 
-    status(`Preparing staged inputs (${data.video.size} B video + ${data.audio.size} B audio)…`);
-
-    // The streams were already downloaded locally by video-stager.js. Read both
-    // blobs concurrently; do NOT fetch them again through blob URLs.
-    const [videoBuffer, audioBuffer] = await Promise.all([
-      data.video.arrayBuffer(),
-      data.audio.arrayBuffer()
-    ]);
+    const videoBuffer = data.video;
+    const audioBuffer = data.audio;
+    status(`Preparing staged inputs (${videoBuffer.byteLength} B video + ${audioBuffer.byteLength} B audio)…`);
 
     if (!videoBuffer.byteLength || !audioBuffer.byteLength) {
       throw new Error(`Empty FFmpeg input: video ${videoBuffer.byteLength} B, audio ${audioBuffer.byteLength} B.`);
@@ -205,7 +200,11 @@ self.onmessage = async (event) => {
 
     postMessage({ type: 'ffmpeg-progress', progress: 1, time: ffmpegDurationUs, duration: ffmpegDurationUs, frame: 0 });
     log(`Output MP4: ${output.byteLength} bytes`);
-    postMessage({ type: 'done', blob: new Blob([output], { type: 'video/mp4' }) });
+    const outputBuffer = output.buffer.slice(
+      output.byteOffset,
+      output.byteOffset + output.byteLength
+    );
+    postMessage({ type: 'done', buffer: outputBuffer }, [outputBuffer]);
 
     cleanupFile(fs, '/input-video');
     cleanupFile(fs, '/input-audio');

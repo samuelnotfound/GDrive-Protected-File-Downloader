@@ -1960,10 +1960,16 @@ async function startPDFDownload(options = {}) {
     //   Downloading -> Merging -> Processing download -> Download has started -> Video Downloaded
     const videoOverlay = window.GDriveVideoOverlay;
     if (!videoOverlay) throw new Error("Video overlay module failed to load.");
-    const videoStageTypes = new Set(["videoDownloadState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
+    const videoStageTypes = new Set(["videoStreamState", "videoDownloadState", "videoStagePreload", "videoStageStarted", "videoStageStatus", "videoStageProgress", "videoStageMergeProgress", "videoStageDownloadStarted", "videoStageFinished", "videoStageError", "videoStageCancelled"]);
     const setVideoBusy = busy => { videoDownloadInProgress = busy; updateVideoMenuState(); };
     chrome.runtime.onMessage.addListener(msg => {
         if (window.top !== window.self || !videoStageTypes.has(msg?.type)) return;
+        if (msg.type === "videoStreamState") {
+            videoPlaybackStarted = !!msg.playbackStarted;
+            if (typeof msg.hasVideo === "boolean") setVideoDownloadState(msg.hasVideo);
+            else updateVideoMenuState();
+            return;
+        }
         if (msg.type === "videoDownloadState") return setVideoBusy(msg.state === "busy");
         if (msg.type === "videoStagePreload") {
             const job = videoOverlay.getJobId(), stage = videoOverlay.getStage();

@@ -146,12 +146,14 @@ function stopStreamWarmups(jobId) {
     }
 }
 let videoOffscreenCreating = null;
+let videoOffscreenClosing = null;
 let videoOffscreenCloseTimer = null;
 async function ensureVideoOffscreen() {
     if (videoOffscreenCloseTimer) {
         clearTimeout(videoOffscreenCloseTimer);
         videoOffscreenCloseTimer = null;
     }
+    if (videoOffscreenClosing) await videoOffscreenClosing;
     const url = chrome.runtime.getURL('video-stager.html');
     if (chrome.runtime.getContexts) {
         const contexts = await chrome.runtime.getContexts({
@@ -169,10 +171,14 @@ async function ensureVideoOffscreen() {
     await videoOffscreenCreating;
 }
 async function closeVideoOffscreen() {
-    try {
-        await chrome.offscreen.closeDocument();
-    }catch (_) {
+    if (!videoOffscreenClosing) {
+        videoOffscreenClosing = Promise.resolve()
+            .then(() => chrome.offscreen.closeDocument())
+            .catch(() => {});
     }
+    const closing = videoOffscreenClosing;
+    await closing;
+    if (videoOffscreenClosing === closing) videoOffscreenClosing = null;
 }
 function scheduleVideoOffscreenCloseIfIdle(delayMs) {
     if (videoOffscreenCloseTimer) clearTimeout(videoOffscreenCloseTimer);

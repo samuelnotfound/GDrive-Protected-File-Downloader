@@ -122,6 +122,28 @@ test('offscreen start reports a missing message acknowledgement', async () => {
     );
 });
 
+test('offscreen creation waits for an in-progress close', async () => {
+    const { context } = createBackgroundContext();
+    let releaseClose;
+    let created = false;
+    context.chrome.offscreen.closeDocument = () => new Promise(resolve => {
+        releaseClose = resolve;
+    });
+    context.chrome.offscreen.createDocument = async () => {
+        created = true;
+    };
+
+    const closing = context.closeVideoOffscreen();
+    await new Promise(resolve => setImmediate(resolve));
+    const ensuring = context.ensureVideoOffscreen();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(created, false);
+
+    releaseClose();
+    await Promise.all([closing, ensuring]);
+    assert.equal(created, true);
+});
+
 test('audio wait reads a stream captured after download starts', async () => {
     const { context } = createBackgroundContext();
     const waiting = context.waitForAudioStream({}, 300);

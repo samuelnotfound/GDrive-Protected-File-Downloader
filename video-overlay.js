@@ -345,7 +345,7 @@
             root.classList.add('cancelled');
         }else if (stage === 'error') {
             title.textContent = 'Video download failed';
-            info.textContent = '';
+            info.textContent = detail || '';
             cancel.style.display = 'none';
             root.classList.add('error');
         }

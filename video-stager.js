@@ -80,7 +80,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             cancelled: false,
             videoController: null,
             audioController: null,
-            worker: null
+            worker: null,
+            rejectMerge: null
         };
         activeJobs.set(jobId, state);
         sendResponse({ accepted: true });
@@ -103,6 +104,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             state.audioController?.abort();
         }catch (_) {
         }
+        state.rejectMerge?.(Object.assign(new Error("Download cancelled."), {
+            name: "AbortError"
+        }));
+        state.rejectMerge = null;
         try {
             state.worker?.terminate();
         }catch (_) {
@@ -158,6 +163,7 @@ function throwIfCancelled(state) {
 // warm-up is only a speed optimization; these fetches are the real downloads
 // whose data is retained and later merged into the final file.
 async function downloadSourceStreams(jobId, job, state) {
+    throwIfCancelled(state);
     postStageMessage("videoStageStatus", {
         jobId,
         stage: "download",
@@ -201,12 +207,18 @@ function getAudioCodec(url) {
     return "";
 }
 async function mergeStreams(jobId, job, videoBlob, audioBlob, state) {
+    const [videoBuffer, audioBuffer] = await Promise.all([
+        videoBlob.arrayBuffer(),
+        audioBlob.arrayBuffer()
+    ]);
+    throwIfCancelled(state);
     const worker = new Worker(
         chrome.runtime.getURL("vendor/ffmpeg-mux-worker.js")
     );
     state.worker = worker;
     try {
         return await new Promise((resolve, reject) => {
+            state.rejectMerge = reject;
             worker.onmessage = event => {
                 const data = event.data || {};
                 if (data.type === "source-progress") {
@@ -247,7 +259,11 @@ async function mergeStreams(jobId, job, videoBlob, audioBlob, state) {
                     return;
                 }
                 if (data.type === "done") {
-                    resolve(data.blob);
+                    if (!(data.buffer instanceof ArrayBuffer) || !data.buffer.byteLength) {
+                        reject(new Error("FFmpeg produced an invalid MP4."));
+                        return;
+                    }
+                    resolve(new Blob([data.buffer], { type: "video/mp4" }));
                     return;
                 }
                 if (data.type === "error") {
@@ -257,12 +273,15 @@ async function mergeStreams(jobId, job, videoBlob, audioBlob, state) {
             worker.onerror = event => {
                 reject(new Error(event.message || "FFmpeg worker failed."));
             };
-            worker.postMessage({
-                type: "mux",
-                video: videoBlob,
-                audio: audioBlob,
-                audioCodec: getAudioCodec(job.audioUrl)
-            });
+            worker.postMessage(
+                {
+                    type: "mux",
+                    video: videoBuffer,
+                    audio: audioBuffer,
+                    audioCodec: getAudioCodec(job.audioUrl)
+                },
+                [videoBuffer, audioBuffer]
+            );
         });
     } finally {
         try {
@@ -270,6 +289,7 @@ async function mergeStreams(jobId, job, videoBlob, audioBlob, state) {
         } catch (_) {
         }
         state.worker = null;
+        state.rejectMerge = null;
     }
 }
 async function runStagingJob(jobId, state) {
