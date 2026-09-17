@@ -102,7 +102,7 @@ self.onmessage = async (event) => {
 
     status(`Preparing staged inputs (${data.video.size} B video + ${data.audio.size} B audio)…`);
 
-    // The streams were already downloaded locally by video-stager.js. Read both
+    // The streams were already downloaded locally by video-stream-downloader.js. Read both
     // blobs concurrently; do NOT fetch them again through blob URLs.
     const [videoBuffer, audioBuffer] = await Promise.all([
       data.video.arrayBuffer(),
@@ -147,8 +147,11 @@ self.onmessage = async (event) => {
     } else {
       args.push('-c:a', 'aac', '-b:a', '192k');
     }
+    // +faststart rewrites the completed MP4 a second time. Keep it for
+    // ordinary files, but skip that expensive second pass for large inputs.
+    const useFaststart = data.video.size + data.audio.size < 100 * 1024 * 1024;
+    if (useFaststart) args.push('-movflags', '+faststart');
     args.push(
-      '-movflags', '+faststart',
       '-shortest',
       '-progress', 'pipe:1',
       '/output.mp4'
@@ -164,7 +167,10 @@ self.onmessage = async (event) => {
     if (!output?.byteLength) throw new Error('FFmpeg produced an empty MP4.');
 
     postMessage({ type: 'ffmpeg-progress', progress: 1, time: ffmpegDurationUs, duration: ffmpegDurationUs, frame: 0 });
-    postMessage({ type: 'done', blob: new Blob([output], { type: 'video/mp4' }) });
+    const outputBuffer = output.byteOffset === 0 && output.byteLength === output.buffer.byteLength
+      ? output.buffer
+      : output.slice().buffer;
+    postMessage({ type: 'done', buffer: outputBuffer }, [outputBuffer]);
 
     cleanupFile(fs, '/input-video');
     cleanupFile(fs, '/input-audio');
