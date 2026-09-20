@@ -29,11 +29,15 @@
     function logProgressEvent(text) {
         app.postExtensionMessage('info', { log: text });
     }
+    const RING_CIRCUMFERENCE = 2 * Math.PI * 17;
     function resetProgressUI() {
         const root = document.getElementById('psd-inpage-overlay');
         if (!root) return;
         const ring = root.querySelector('#psd-inpage-ring');
-        if (ring) ring.style.strokeDashoffset = '106.8';
+        if (ring) {
+            ring.style.strokeDasharray = String(RING_CIRCUMFERENCE);
+            ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
+        }
         root.classList.remove('cancelled', 'completed');
     }
     function setButtons() {
@@ -70,7 +74,7 @@
         }, 2000);
     }
 
-    const addProtectedPDFMenuDescription = item => app.ui.addMenuDescription(item, "psd-pdf-menu-label", "psd-pdf-menu-info", "Standard downloads are disabled for this file. This option captures each page and combines them into a downloadable PDF.");
+    const addProtectedPDFMenuDescription = item => app.ui.addMenuDescription(item, "psd-pdf-menu-label", "psd-pdf-menu-info", "GDrive Protected File Downloader");
     function activateProtectedPDFDownload(event) {
         event.preventDefault();
         event.stopPropagation();
@@ -482,10 +486,13 @@
             })();
 
             if (image) rememberCapturedPage(pageNumber, image);
+            const capturePercent = totalHint
+                ? Math.min(50, Math.floor(pdf.capturedPages.size / totalHint * 50))
+                : 50;
             reportProgress(
                 "Preparing…",
                 `Recovery ${i + 1} / ${missing.length} — page ${pageNumber}`,
-                50 + Math.floor((i + 1) / missing.length * 25),
+                capturePercent,
                 pdf.capturedPages.size
             );
         }
@@ -576,6 +583,8 @@
     }
     let ocrWorker = null;
     let ocrRequestId = 0;
+    let ocrPageIndex = 0;
+    let ocrPageTotal = 0;
     const ocrRequests = new Map();
     function getOCRWorker() {
         if (ocrWorker) return ocrWorker;
@@ -586,6 +595,14 @@
             };
             if (message.type === "progress") {
                 ocrProgress = Math.max(0, Math.min(1, Number(message.progress) || 0));
+                if (ocrPageTotal > 0) {
+                    const overall = 50 + ((ocrPageIndex + ocrProgress) / ocrPageTotal) * 50;
+                    app.ui.updateInPageOverlay(
+                        "Preparing…",
+                        `OCR page ${ocrPageIndex + 1} / ${ocrPageTotal}`,
+                        overall
+                    );
+                }
                 return;
             }
             if (message.type !== "result" && message.type !== "error") return;
@@ -770,10 +787,12 @@
         let words = [];
 
         if (pdf.enableOCR) {
+            ocrPageIndex = index;
+            ocrPageTotal = total;
             reportProgress(
                 "Preparing…",
                 `OCR page ${index + 1} / ${total}`,
-                50 + Math.floor(((index + 0.35) / total) * 48),
+                50 + ((index / total) * 50),
                 index
             );
 
@@ -858,7 +877,7 @@
                 reportProgress(
                     "Preparing…",
                     `${pdf.enableOCR ? "OCR" : "Processing"} page ${index + 1} / ${total}`,
-                    50 + Math.floor(((index + 1) / total) * 48),
+                    50 + ((index + 1) / total) * 50,
                     converted
                 );
                 if ((index + 1) % 5 === 0 || index === orderedPages.length - 1) {
@@ -896,18 +915,10 @@
     }
 async function start(options = {}) {
         if (pdf.running) return;
-        if (Object.prototype.hasOwnProperty.call(options, "enableOCR")) {
-            pdf.enableOCR = !!options.enableOCR;
-        }else {
-            try {
-                const pref = await chrome.storage.local.get({
-                    ocrEnabled: true
-                });
-                pdf.enableOCR = pref.ocrEnabled !== false;
-            }catch (_) {
-                pdf.enableOCR = true;
-            }
-        }
+        // Restore the original working behavior: OCR is always attempted.
+        // The temporary OCR toggle in the newer overlay could persist a false
+        // value in storage and silently skip the OCR stage. Ignore that setting.
+        pdf.enableOCR = true;
         pdf.completed = false;
         resetProgressUI();
         await preparePDFCapture();

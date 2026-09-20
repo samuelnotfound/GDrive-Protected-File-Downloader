@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GDrive View-Only PDF & Video Downloader",
-  "version": "1.46.1",
-  "description": "Downloads view-only Google Drive PDFs and videos using the rendered PDF pages and captured Google Drive media streams.",
+  "version": "1.84.25",
+  "description": "Downloads view-only Google Drive PDFs and videos. Compact inline Material quality picker with automatic audio selection and restored PDF OCR pipeline.",
   "permissions": [
     "activeTab",
     "downloads",
@@ -10,7 +10,9 @@
     "storage",
     "tabs",
     "webRequest",
-    "offscreen"
+    "offscreen",
+    "debugger",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -26,23 +28,49 @@
   "content_scripts": [
     {
       "matches": [
-        "https://drive.google.com/*",
-        "https://*.drive.google.com/*",
-        "https://*.googleusercontent.com/*",
-        "https://classroom.google.com/*",
-        "https://*.classroom.google.com/*"
+        "<all_urls>"
       ],
       "js": [
-        "ui.js",
-        "pdf-downloader.js",
-        "video-controller.js"
+        "drive-autoplay.js"
       ],
       "run_at": "document_idle",
-      "all_frames": true
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "world": "ISOLATED",
+      "match_about_blank": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "drive-network-bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "world": "MAIN",
+      "match_about_blank": true
+    },
+    {
+      "matches": [
+        "https://drive.google.com/*",
+        "https://*.drive.google.com/*",
+        "https://*.googleusercontent.com/*"
+      ],
+      "js": [
+        "drive-ui.js",
+        "drive-pdf.js",
+        "drive-video.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "world": "ISOLATED"
     }
   ],
   "background": {
-    "service_worker": "service-worker.js"
+    "service_worker": "background.js"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

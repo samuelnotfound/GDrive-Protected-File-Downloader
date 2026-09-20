@@ -182,9 +182,9 @@
 #psd-inpage-head { display:grid; grid-template-columns:36px minmax(0,1fr) auto; align-items:center; column-gap:14px; min-height:36px; position:relative }
 #psd-inpage-spinner,#psd-inpage-check { width:36px; height:36px; flex:0 0 36px; position:relative }
 #psd-inpage-spinner svg,#psd-inpage-check svg { display:block; width:36px; height:36px }
-#psd-inpage-spinner svg { transform:rotate(-90deg) }
+#psd-inpage-spinner svg { transform:rotate(-90deg); overflow:visible }
 #psd-inpage-spinner .psd-ring-bg { fill:none; stroke:#444746; stroke-width:3.5 }
-#psd-inpage-spinner .psd-ring { fill:none; stroke:#a8c7fa; stroke-width:3.5; stroke-linecap:round; stroke-dasharray:106.8; stroke-dashoffset:106.8; transition:stroke-dashoffset .15s linear }
+#psd-inpage-spinner .psd-ring { fill:none; stroke:#a8c7fa; stroke-width:3.5; stroke-linecap:round; stroke-dasharray:106.814150222; stroke-dashoffset:106.814150222; transition:stroke-dashoffset .15s linear; transform-box:fill-box; transform-origin:center }
 #psd-inpage-check { display:none }
 #psd-inpage-check circle { fill:none; stroke:#81c995; stroke-width:3.5 }
 #psd-inpage-check path { fill:none; stroke:#81c995; stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round }
@@ -273,6 +273,7 @@
         }
         updateWindowControl();
     }
+    const INPAGE_RING_CIRCUMFERENCE = 2 * Math.PI * 17;
     function updateInPageOverlay(status, detail, percent) {
         const root = document.getElementById('psd-inpage-overlay');
         if (!root) return;
@@ -288,7 +289,7 @@
         }
         if (detailEl && !root.classList.contains('cancelled')) {
             const text = String(detail || '');
-            if (/^(?:Processing page|OCR page)\b/i.test(text) || /^Loading pages?\b/i.test(text)) detailEl.textContent = text;
+            if (/^(?:Processing page|OCR page)\b/i.test(text)) detailEl.textContent = text;
             else if (/^Preparing page\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing page/i, 'Capturing page');
             else if (/^Preparing pages\b/i.test(text)) detailEl.textContent = text.replace(/^Preparing pages/i, 'Capturing');
             else if (/^Preparing your PDF/i.test(text)) detailEl.textContent = 'Preparing PDF…';
@@ -297,7 +298,11 @@
         if (typeof percent === 'number') {
             const safePercent = Math.max(0, Math.min(100, percent));
             const ring = root.querySelector('#psd-inpage-ring');
-            if (ring) ring.style.strokeDashoffset = `${106.8 - (106.8 * safePercent / 100)}`;
+            const offset = INPAGE_RING_CIRCUMFERENCE * (1 - safePercent / 100);
+            if (ring) {
+                ring.style.strokeDasharray = String(INPAGE_RING_CIRCUMFERENCE);
+                ring.style.strokeDashoffset = String(offset);
+            }
         }
     }
 
