@@ -1,9 +1,3 @@
-/**
- * Video Stream Downloader
- * Runs in the offscreen document and downloads selected Drive video/audio
- * streams into Blobs. Jobs are isolated so one video's cancellation/state
- * cannot accidentally affect another video's stream.
- */
 
 (() => {
     const NS = 'GDriveVideoStreamDownloader';
@@ -142,11 +136,8 @@
     });
 
     window[NS] = {
-        getJob,
         postStageMessage,
         throwIfCancelled,
-        isAbortError,
-        cancel,
-        downloadSourceStreams
+        cancel
     };
 })();

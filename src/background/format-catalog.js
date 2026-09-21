@@ -1,4 +1,22 @@
-// Stream parsing, normalization, and format catalog operations.
+function cleanURL(url) {
+    if (!url) return null;
+    const value = String(url);
+    const rangeIndex = value.search(/[?&]range=/i);
+    return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
+}
+
+
+const AUDIO_ITAG_PATTERN = /^(139|140|141|249|250|251)$/;
+
+function isAudioStream(stream) {
+    return /audio/i.test(String(stream?.mime || '')) || AUDIO_ITAG_PATTERN.test(String(stream?.itag || ''));
+}
+
+const bySizeDesc = (a, b) => Number(b.contentLength || 0) - Number(a.contentLength || 0);
+const byHeightThenSize = (a, b) => (Number(b.height || 0) - Number(a.height || 0)) || bySizeDesc(a, b);
+const byHeightWidthThenSize = (a, b) =>
+    (Number(b.height || 0) - Number(a.height || 0)) || (Number(b.width || 0) - Number(a.width || 0)) || bySizeDesc(a, b);
+
 
 function sanitizeVideoFilename(name) {
     let value = String(name || '').trim()
@@ -9,15 +27,12 @@ function sanitizeVideoFilename(name) {
     return /\.(mp4|m4v|webm|mov|avi|mkv|flv|3gp)$/i.test(value) ? value : `${value}.mp4`;
 }
 
-function emptySession(tabId = null, fileId = '', filename = '', viewerSessionId = '') {
+function emptySession(fileId = '', filename = '', viewerSessionId = '') {
     return {
-        tabId: Number.isInteger(tabId) ? tabId : null,
         fileId: String(fileId || ''),
         filename: String(filename || 'gdrive-video'),
         viewerSessionId: String(viewerSessionId || ''),
         pageBridgeId: '',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
         playbackStarted: false,
         streamCaptureEnabled: false,
         video: null,
@@ -32,11 +47,8 @@ function emptySession(tabId = null, fileId = '', filename = '', viewerSessionId 
             progressive: []
         },
         formatsFetchedAt: 0,
-        legacyFormatsFetchedAt: 0,
         activeQualityProbe: null,
-        probeCandidates: [],
-        qualityStreams: [],
-        timestamp: null
+        probeCandidates: []
     };
 }
 
@@ -117,7 +129,7 @@ function addUniqueCandidate(list, candidate, max = 12) {
     const existing = Array.isArray(list) ? list : [];
     const identity = item => {
         const itag = String(item?.itag || '').trim();
-        const isAudio = /audio/i.test(String(item?.mime || '')) || /^(139|140|141|249|250|251)$/.test(itag);
+        const isAudio = isAudioStream(item);
         if (itag) {
             const quality = Number(item?.height || 0);
             const width = Number(item?.width || 0);
@@ -156,7 +168,6 @@ function dedupeAudioFormats(list) {
         const unknown = byLen.get(0);
         byLen.delete(0);
         if (known.length) {
-            // A copy with no size yet is the same file as the sized one of the same itag.
             if (unknown && known.length === 1) {
                 const sized = byLen.get(known[0]);
                 if (!newer(sized, unknown)) byLen.set(known[0], { ...unknown, contentLength: known[0] });
@@ -233,29 +244,25 @@ async function probePlaybackURL(url, expectedFileId = '') {
     }
 }
 
+async function validateFormatList(list, fileId) {
+    const results = await Promise.all((Array.isArray(list) ? list : []).map(async format =>
+        (await probePlaybackURL(format.originalUrl || format.url, fileId)) ? format : null
+    ));
+    return results.filter(Boolean);
+}
+
 async function validateFormatSet(formats, fileId) {
     const input = formats || { video: [], audio: [], progressive: [] };
-    const video = Array.isArray(input.video) ? input.video : [];
-    const audio = Array.isArray(input.audio) ? input.audio : [];
-    const progressive = Array.isArray(input.progressive) ? input.progressive : [];
-
-    // Validate every representation returned by Drive in parallel, but only
-    // keep one usable representation for a duplicate quality/itag.
-    const [videoOk, audioOk, progressiveOk] = await Promise.all([
-        Promise.all(video.map(async fmt => (await probePlaybackURL(fmt.originalUrl || fmt.url, fileId)) ? fmt : null)),
-        Promise.all(audio.map(async fmt => (await probePlaybackURL(fmt.originalUrl || fmt.url, fileId)) ? fmt : null)),
-        Promise.all(progressive.map(async fmt => (await probePlaybackURL(fmt.originalUrl || fmt.url, fileId)) ? fmt : null))
+    const [video, audio, progressive] = await Promise.all([
+        validateFormatList(input.video, fileId),
+        validateFormatList(input.audio, fileId),
+        validateFormatList(input.progressive, fileId)
     ]);
 
-    const sortVideo = (a, b) => (Number(b.height || 0) - Number(a.height || 0)) ||
-        (Number(b.width || 0) - Number(a.width || 0)) ||
-        (Number(b.contentLength || 0) - Number(a.contentLength || 0));
-    const sortAudio = (a, b) => (Number(b.contentLength || 0) - Number(a.contentLength || 0));
-
     return {
-        video: mergeFormatLists([], videoOk.filter(Boolean), sortVideo),
-        audio: mergeFormatLists([], audioOk.filter(Boolean), sortAudio),
-        progressive: mergeFormatLists([], progressiveOk.filter(Boolean), sortVideo)
+        video: mergeFormatLists([], video, byHeightWidthThenSize),
+        audio: mergeFormatLists([], audio, bySizeDesc),
+        progressive: mergeFormatLists([], progressive, byHeightWidthThenSize)
     };
 }
 
@@ -345,13 +352,9 @@ function parsePlaybackFormats(payload) {
         });
     };
 
-    result.video = dedupe(result.video).sort((a, b) =>
-        (b.height - a.height) || (b.width - a.width) || (b.contentLength - a.contentLength)
-    );
-    result.audio = dedupe(result.audio).sort((a, b) => b.contentLength - a.contentLength);
-    result.progressive = dedupe(result.progressive).sort((a, b) =>
-        ((b.height || 0) - (a.height || 0)) || (b.contentLength - a.contentLength)
-    );
+    result.video = dedupe(result.video).sort(byHeightWidthThenSize);
+    result.audio = dedupe(result.audio).sort(bySizeDesc);
+    result.progressive = dedupe(result.progressive).sort(byHeightWidthThenSize);
 
     return result;
 }

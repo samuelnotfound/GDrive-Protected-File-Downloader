@@ -1,5 +1,3 @@
-// Per-tab video session/job state and stream warmup.
-
 const activeStreamWarmups = new Map();
 function startStreamWarmup(jobId, label, url, durationMs = 10000) {
     if (!jobId || !url) return;
@@ -53,11 +51,10 @@ function queueSessionMutation(tabId, mutator) {
     const key = String(Number(tabId));
     const task = sessionsQueue.then(async () => {
         const sessions = await loadSessions();
-        const current = sessions[key] || emptySession(Number(tabId));
+        const current = sessions[key] || emptySession();
         const next = await mutator(current);
         if (next === false) return sessions;
         sessions[key] = next || current;
-        sessions[key].updatedAt = Date.now();
         await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions;
     });
@@ -77,8 +74,7 @@ async function setStoredSession(tabId, value) {
     const key = String(tabId);
     const task = sessionsQueue.then(async () => {
         const sessions = await loadSessions();
-        sessions[key] = value || emptySession(tabId);
-        sessions[key].updatedAt = Date.now();
+        sessions[key] = value || emptySession();
         await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions[key];
     });
@@ -123,12 +119,13 @@ async function getStoredJobs() {
 
 function getBestAudioURL(streams) {
     const candidates = streams?.audioCandidates?.length
-        ? streams.audioCandidates
+        ? streams.audioCandidates.filter(candidate => candidate?.url)
         : streams?.audio
-            ? [streams.audioOriginal || streams.audio]
+            ? [{ url: streams.audioOriginal || streams.audio }]
             : [];
-    return candidates.reduce(
-        (best, url) => getStreamBytes(url) > getStreamBytes(best) ? url : best,
+    const best = candidates.reduce(
+        (current, candidate) => getStreamBytes(candidate.url) > getStreamBytes(current?.url) ? candidate : current,
         null
     );
+    return best?.url || null;
 }

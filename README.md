@@ -2,12 +2,20 @@
 
 A Chrome extension that adds a download button to Google Drive files that have the normal Download option disabled. The extension does not remove permissions or bypass account restrictions.
 
+|                             Before                              |                             After                             |
+| :-------------------------------------------------------------: | :-----------------------------------------------------------: |
+| ![Google Drive File menu before](README_assets/menu-before.png) | ![Google Drive File menu after](README_assets/menu-after.png) |
+|               **Original Google Drive File menu**               |              **File menu using this extension**               |
+
+The extension adds a **Download** entry directly to the existing Google Drive menu. The added item uses the surrounding Drive menu styling and includes the extension name beneath it.
+
 ## Features
 
 - Adds a **Download** button when the normal Google Drive download option is disabled.
 - Saves **view-only PDF and video files** as downloadable files.
 - Makes generated PDFs **text-searchable using OCR**.
 - Processes PDF content and video files locally in the browser.
+- Detects the available video resolutions through the Drive player's own Settings → Quality menu.
 - Runs directly as a Chrome extension.
 
 ## How does it work?
@@ -24,7 +32,30 @@ The extension captures the pages as they are rendered in the Google Drive viewer
 
 When a video is played, Google Drive provides the video and audio separately to the video player. The extension detects those streams, downloads them, and automatically combines them into a single video file using FFmpeg.
 
+To offer a choice of resolutions, the extension briefly drives the player itself: it starts muted playback, opens the player's own **Settings → Quality** menu, and selects each listed resolution so Drive requests the matching stream. The trigger finds the player's controls by their accessible labels across documents and open shadow roots and activates them with ordinary DOM clicks.
+
 Support for additional file types is currently unplanned.
+
+## Project structure
+
+The source code is grouped by responsibility so the repository root stays easy to browse:
+
+```text
+GDrive-Protected-File-Downloader/
+├── src/
+│   ├── background/          # Service-worker modules
+│   ├── content/
+│   │   ├── drive/            # Drive PDF/video UI and download workflows
+│   │   ├── automation/       # Player automation and quality probing
+│   │   └── media/            # Page-world media/network hooks
+│   ├── offscreen/             # Video staging and FFmpeg processing
+│   └── background.js         # Service-worker entry point
+├── vendor/                   # Bundled OCR and FFmpeg assets
+├── icons/                    # Extension icons
+├── README_assets/            # README screenshots
+├── manifest.json
+└── README.md
+```
 
 ## Installation
 
@@ -37,25 +68,14 @@ Support for additional file types is currently unplanned.
 
 ## Usage
 
-### PDF
+1. Open the protected/view-only file in Google Drive.
+2. Open **File**.
+3. Click **Download** under **GDrive Protected File Downloader**.
+4. The extension starts the download workflow.
 
-1. Open a **view-only PDF** in Google Drive.
-2. If the PDF was opened through Google Classroom, select **File** → **Open** → **Open in new tab** to open it directly in Google Drive.
-3. Open the **File** menu.
-4. Select **Download View-Only PDF**.
-5. The extension will begin capturing and processing the rendered pages.
-6. Once processing is complete, the generated PDF will be downloaded.
+For files opened through Google Classroom, use **File → Open → Open in new tab** first, then open the Google Drive **File** menu.
 
-### Video
-
-1. Open a **view-only video** in Google Drive.
-2. Start the video player.
-3. Open the player's **Settings**.
-4. Select **Quality**.
-5. Choose your preferred resolution.
-6. Start the download using the extension.
-
-> **Important:** The downloader uses the video quality provided by the Google Drive player. Select your preferred resolution **before starting the download** so the downloader receives the intended quality.
+**Important:** The quality probe temporarily blocks page interaction while it drives the Google Drive player. The page is released as soon as the quality picker is ready.
 
 ## Limitations
 

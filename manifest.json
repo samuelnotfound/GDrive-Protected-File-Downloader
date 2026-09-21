@@ -1,17 +1,13 @@
 {
   "manifest_version": 3,
   "name": "GDrive View-Only PDF & Video Downloader",
-  "version": "1.84.25",
-  "description": "Downloads view-only Google Drive PDFs and videos. Compact inline Material quality picker with automatic audio selection and restored PDF OCR pipeline.",
+  "version": "1.85.1",
+  "description": "Downloads view-only Google Drive PDFs and videos. DOM-based quality detection, compact inline Material quality picker, automatic audio selection and PDF OCR pipeline.",
   "permissions": [
-    "activeTab",
-    "downloads",
     "scripting",
     "storage",
-    "tabs",
     "webRequest",
     "offscreen",
-    "debugger",
     "webNavigation"
   ],
   "host_permissions": [
@@ -31,7 +27,8 @@
         "<all_urls>"
       ],
       "js": [
-        "drive-autoplay.js"
+        "src/content/automation/autoplay.js",
+        "src/content/automation/quality-trigger.js"
       ],
       "run_at": "document_idle",
       "all_frames": true,
@@ -44,7 +41,8 @@
         "<all_urls>"
       ],
       "js": [
-        "drive-network-bridge.js"
+        "src/content/media/network-bridge.js",
+        "src/content/media/media-mute-guard.js"
       ],
       "run_at": "document_start",
       "all_frames": true,
@@ -59,9 +57,10 @@
         "https://*.googleusercontent.com/*"
       ],
       "js": [
-        "drive-ui.js",
-        "drive-pdf.js",
-        "drive-video.js"
+        "src/content/drive/ui.js",
+        "src/content/drive/pdf.js",
+        "src/content/drive/video-overlay.js",
+        "src/content/drive/video.js"
       ],
       "run_at": "document_idle",
       "all_frames": true,
@@ -70,7 +69,7 @@
     }
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "src/background.js"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

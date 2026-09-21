@@ -1,9 +1,3 @@
-/**
- * Video Processor
- * Runs in the offscreen document after source streams are downloaded.
- * Merges adaptive video+audio with FFmpeg when necessary, or saves a selected
- * progressive stream directly. Each job has its own FFmpeg worker.
- */
 
 (() => {
     const downloader = window.GDriveVideoStreamDownloader;

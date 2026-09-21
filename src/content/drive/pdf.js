@@ -1,7 +1,3 @@
-/**
- * PDF Downloader
- * Captures protected Google Drive PDF pages, optionally runs OCR, builds the PDF, and saves it.
- */
 
 (() => {
     if (!window.__PSD_LOADED || window.__PSD_PDF_LOADED) return;
@@ -20,15 +16,8 @@
     const PAGE_NAV_WAIT = 250;
     const SCROLL_SETTLE = 60;
 
-    function reportProgress(status, detail, percent = null, count = null) {
-        app.postExtensionMessage('info', {
-            status, detail, done: count, total: pdf.currentTotalHint || count, percent
-        });
+    const reportProgress = (status, detail, percent = null) =>
         app.ui.updateInPageOverlay(status, detail, percent);
-    }
-    function logProgressEvent(text) {
-        app.postExtensionMessage('info', { log: text });
-    }
     const RING_CIRCUMFERENCE = 2 * Math.PI * 17;
     function resetProgressUI() {
         const root = document.getElementById('psd-inpage-overlay');
@@ -40,16 +29,10 @@
         }
         root.classList.remove('cancelled', 'completed');
     }
-    function setButtons() {
-        app.postExtensionMessage('state', { running: pdf.running, ready: pdf.ready, completed: pdf.completed });
-        app.ui.updateWindowControl();
-    }
     function showUnsupportedFile() {
         clearTimeout(pdf.unsupportedTimer);
-        pdf.running = false;
-        pdf.ready = false;
-        pdf.completed = false;
-        setButtons();
+        pdf.status = 'idle';
+        app.ui.updateWindowControl();
         app.ui.showInPageOverlay(true);
         const root = document.getElementById('psd-inpage-overlay');
         if (root) {
@@ -64,7 +47,6 @@
             if (spinner) spinner.style.display = 'none';
             if (actions) actions.style.display = 'none';
         }
-        app.postExtensionMessage('info', { status: 'File type not supported', detail: '', done: 0, total: 0, percent: 0 });
         pdf.unsupportedTimer = setTimeout(() => {
             const current = document.getElementById('psd-inpage-overlay');
             if (current) {
@@ -88,7 +70,7 @@
         root?.querySelector("#psd-inpage-detail")?.replaceChildren(
             document.createTextNode("")
         );
-        setTimeout(() => start(), 0);
+        void start();
     }
     function scanMenu(menu) {
         if (!app.isDrivePage() || !document.body || !currentDriveFileIsPDF()) return;
@@ -137,26 +119,6 @@
         return !!document.querySelector('[aria-label*=".pdf" i], [title*=".pdf" i], [data-tooltip*=".pdf" i]');
     }
 
-    async function consumeAutoStart() {
-        let pending = false;
-        try {
-            const result = await chrome.storage.session.get({
-                psdAutoStart: false
-            });
-            pending = !!result.psdAutoStart;
-            if (pending) await chrome.storage.session.remove("psdAutoStart");
-        }catch (_) {
-            try {
-                const result = await chrome.storage.local.get({
-                    psdAutoStart: false
-                });
-                pending = !!result.psdAutoStart;
-                if (pending) await chrome.storage.local.remove("psdAutoStart");
-            }catch (_) {
-            }
-        }
-        return pending;
-    }
     let viewerImageRoot = null;
     let viewerImageRootAt = 0;
 
@@ -277,10 +239,6 @@
         return null;
     }
 
-    async function waitForFirstPageReady(timeout = IMAGE_WAIT_RECOVERY) {
-        return waitForCurrentPageImage(1, "", timeout);
-    }
-
     let pageInputCache = null;
     let pageInputCacheAt = 0;
 
@@ -376,7 +334,6 @@
     function resetCaptureState() {
         pdf.pages.clear();
         pdf.capturedPages.clear();
-        pdf.currentTotalHint = null;
         pdf.orderCounter = 0;
         pageInputCache = null;
         pageCountCache = null;
@@ -402,39 +359,33 @@
         }
         return true;
     }
+    async function capturePage(pageNumber, imageWaitMs, navigateWaitMs = PAGE_NAV_WAIT, allowSameImageIfAlreadyCurrent = false) {
+        const currentPage = getPageInput()?.current || 0;
+        const previous = getCurrentPageImage();
+        const previousSrc = previous?.currentSrc || previous?.src || "";
+        if (!(await goToPage(pageNumber, navigateWaitMs))) return false;
+
+        const allowSameSrc = allowSameImageIfAlreadyCurrent && currentPage === pageNumber && previousSrc !== "";
+        const image = await waitForCurrentPageImage(pageNumber, previousSrc, imageWaitMs, allowSameSrc);
+        return !!(image && rememberCapturedPage(pageNumber, image));
+    }
+
     async function capturePagesByNumber(totalHint) {
         if (!totalHint || pdf.stopRequested) return;
 
         for (let pageNumber = 1; pageNumber <= totalHint && !pdf.stopRequested; pageNumber++) {
-            const previous = getCurrentPageImage();
-            const previousSrc = previous?.currentSrc || previous?.src || "";
-            const navigated = await goToPage(pageNumber);
-            let captured = false;
-
-            if (navigated) {
-                const image = await waitForCurrentPageImage(pageNumber, previousSrc, IMAGE_WAIT_FAST);
-                captured = !!(image && rememberCapturedPage(pageNumber, image));
-            }
-
+            const captured = await capturePage(pageNumber, IMAGE_WAIT_FAST);
             reportProgress(
                 "Preparing…",
                 captured
                     ? `Captured page ${pageNumber} / ${totalHint}`
                     : `Capturing page ${pageNumber} / ${totalHint}`,
-                Math.floor(pageNumber / totalHint * 50),
-                pdf.capturedPages.size
+                Math.floor(pageNumber / totalHint * 50)
             );
-
-            if (!captured && (pageNumber % 10 === 0 || pageNumber === totalHint)) {
-                logProgressEvent(`⚠ Page ${pageNumber}/${totalHint} missed; recovery will retry it.`);
-            } else if (captured && (pageNumber % 10 === 0 || pageNumber === totalHint)) {
-                logProgressEvent(`✓ Page ${pageNumber}/${totalHint} — ${pdf.capturedPages.size}/${totalHint} verified`);
-            }
         }
     }
 
     async function capturePagesByScrolling(totalHint) {
-        logProgressEvent("Page-number control not found. Using automatic scrolling fallback…");
         let roots = getScrollableElements(true);
         let noNewPasses = 0;
 
@@ -453,11 +404,8 @@
             const percent = totalHint
                 ? Math.min(50, Math.floor(Math.min(pdf.pages.size, totalHint) / totalHint * 50))
                 : Math.min(50, Math.floor(step / 1200 * 50));
-            reportProgress("Preparing…", `Capturing ${pdf.pages.size}${totalHint ? ` / ${totalHint}` : ""}`, percent, pdf.pages.size);
+            reportProgress("Preparing…", `Capturing ${pdf.pages.size}${totalHint ? ` / ${totalHint}` : ""}`, percent);
 
-            if (added && (pdf.pages.size % 10 === 0 || (totalHint && pdf.pages.size >= totalHint))) {
-                logProgressEvent(`✓ ${pdf.pages.size}${totalHint ? `/${totalHint}` : ""} page images found`);
-            }
 
             if (!moved && noNewPasses >= 3) break;
             if (roots.length && roots.every(root => root.scrollTop >= root.scrollHeight - root.clientHeight - 10) && noNewPasses >= 3) break;
@@ -472,36 +420,24 @@
             if (!pdf.capturedPages.has(pageNumber)) missing.push(pageNumber);
         }
         if (!missing.length) return;
-
-        logProgressEvent(`⚠ ${missing.length} pages missing. Running one targeted recovery pass…`);
         for (let i = 0; i < missing.length && !pdf.stopRequested; i++) {
             const pageNumber = missing[i];
-            const before = getPageInput()?.current || 0;
-            const previous = getCurrentPageImage();
-            const previousSrc = previous?.currentSrc || previous?.src || "";
-            const image = await (async () => {
-                if (!(await goToPage(pageNumber, 500))) return null;
-                const samePage = before === pageNumber;
-                return waitForCurrentPageImage(pageNumber, previousSrc, IMAGE_WAIT_RECOVERY, samePage && previousSrc !== "");
-            })();
-
-            if (image) rememberCapturedPage(pageNumber, image);
+            await capturePage(pageNumber, IMAGE_WAIT_RECOVERY, 500, true);
             const capturePercent = totalHint
                 ? Math.min(50, Math.floor(pdf.capturedPages.size / totalHint * 50))
                 : 50;
             reportProgress(
                 "Preparing…",
                 `Recovery ${i + 1} / ${missing.length} — page ${pageNumber}`,
-                capturePercent,
-                pdf.capturedPages.size
+                capturePercent
             );
         }
     }
 
     function finishCancelledCapture() {
         app.ui.showScrollDim(false);
-        pdf.running = false;
-        setButtons();
+        pdf.status = 'cancelled';
+        app.ui.updateWindowControl();
 
         const root = document.getElementById("psd-inpage-overlay");
         if (root) {
@@ -509,31 +445,26 @@
             root.querySelector("#psd-inpage-title").textContent = "Download cancelled";
             setTimeout(() => app.ui.showInPageOverlay(false), 800);
         }
-        logProgressEvent("Preload stopped.");
     }
     async function preparePDFCapture() {
-        if (pdf.running || !app.isDrivePage()) return;
+        if (pdf.status === 'capturing' || pdf.status === 'processing' || !app.isDrivePage()) return;
         if (!currentDriveFileIsPDF()) {
-            pdf.running = false;
-            pdf.ready = false;
-            setButtons();
+            pdf.status = 'idle';
+            app.ui.updateWindowControl();
             showUnsupportedFile();
             return;
         }
-        pdf.running = true;
+        pdf.status = 'capturing';
         pdf.stopRequested = false;
-        pdf.ready = false;
         resetCaptureState();
         resetProgressUI();
         const overlay = document.getElementById("psd-inpage-overlay");
         overlay?.classList.remove("minimized");
-        setButtons();
+        app.ui.updateWindowControl();
         app.ui.showScrollDim(true);
-        reportProgress("Preparing…", "Reading page count…", 0, 0);
+        reportProgress("Preparing…", "Reading page count…", 0);
         const pageInfo = await waitForPageInfo();
         const totalHint = pageInfo?.max || getPageCountHint();
-        pdf.currentTotalHint = totalHint;
-        logProgressEvent(`Detected page count: ${totalHint || "unknown"}`);
         if (pageInfo && totalHint) {
             await capturePagesByNumber(totalHint);
         } else {
@@ -551,29 +482,21 @@
         app.ui.showScrollDim(false);
         const capturedCount = totalHint ? pdf.capturedPages.size : pdf.pages.size;
         const total = totalHint || capturedCount;
-        pdf.ready = capturedCount > 0 && (!totalHint || capturedCount >= totalHint);
-        pdf.running = false;
-        setButtons();
-        const detail = pdf.ready
+        const ready = capturedCount > 0 && (!totalHint || capturedCount >= totalHint);
+        pdf.status = ready ? 'ready' : 'idle';
+        app.ui.updateWindowControl();
+        const detail = ready
             ? `${capturedCount} / ${total} page images captured`
             : `${capturedCount} / ${total || "?"} page images captured. Try Start again.`;
-        const percent = pdf.ready
+        const percent = ready
             ? 100
             : Math.min(99, Math.floor(capturedCount / Math.max(1, total) * 100));
         reportProgress(
-            pdf.ready ? "Ready to process PDF" : "Some pages were not captured",
+            ready ? "Ready to process PDF" : "Some pages were not captured",
             detail,
-            percent,
-            capturedCount
+            percent
         );
-        logProgressEvent(
-            pdf.ready
-                ? "✓ Capture complete — all pages captured. Starting OCR/PDF processing…"
-                : "⚠ Capture ended before all pages were captured."
-        );
-        if (pdf.ready && !pdf.stopRequested) {
-            await generatePDF();
-        }
+        if (ready && !pdf.stopRequested) await generatePDF();
     }
     function getPDFDownloadFilename() {
         let title = document.querySelector('meta[itemprop="name"]')?.content || document.title || "download.pdf";
@@ -784,30 +707,20 @@
     }
     async function convertPageToPDF(writer, page, index, total) {
         const jpeg = await encodePageAsJPEG(page);
+        ocrPageIndex = index;
+        ocrPageTotal = total;
+        reportProgress(
+            "Preparing…",
+            `OCR page ${index + 1} / ${total}`,
+            50 + ((index / total) * 50)
+        );
+
         let words = [];
-
-        if (pdf.enableOCR) {
-            ocrPageIndex = index;
-            ocrPageTotal = total;
-            reportProgress(
-                "Preparing…",
-                `OCR page ${index + 1} / ${total}`,
-                50 + ((index / total) * 50),
-                index
-            );
-
-            try {
-                words = await runOCROnPage(jpeg.bytes.slice());
-            } catch (ocrError) {
-                logProgressEvent(`⚠ OCR unavailable (${ocrError.message}). Continuing without OCR.`);
-            }
-        } else {
-            reportProgress(
-                "Preparing…",
-                `Processing page ${index + 1} / ${total}`,
-                50 + Math.floor((index / total) * 48),
-                index
-            );
+        try {
+            words = await runOCROnPage(jpeg.bytes.slice());
+        } catch (error) {
+            // OCR is optional: keep the captured image when text extraction fails.
+            console.warn('[GDrive PDF] OCR failed for page', index + 1, error);
         }
 
         writer.addPage(index, {
@@ -817,8 +730,8 @@
             words
         });
     }
-    async function finishPDFDownload(writer, converted) {
-        reportProgress("Preparing…", "Finalizing the PDF file", 99, converted);
+    async function finishPDFDownload(writer) {
+        reportProgress("Preparing…", "Finalizing the PDF file", 99);
         await shutdownOCRWorker();
         const blob = writer.finish();
         const url = URL.createObjectURL(blob);
@@ -829,12 +742,10 @@
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        pdf.running = false;
-        pdf.completed = true;
-        pdf.ready = false;
+        pdf.status = 'completed';
         resetCaptureState();
-        setButtons();
-        reportProgress("File downloaded", "", 100, converted);
+        app.ui.updateWindowControl();
+        reportProgress("File downloaded", "", 100);
         const doneRoot = document.getElementById("psd-inpage-overlay");
         if (doneRoot) {
             doneRoot.classList.remove("cancelled", "unsupported");
@@ -851,119 +762,73 @@
             if (doneDetail) doneDetail.textContent = "";
         }
         app.ui.updateWindowControl();
-        logProgressEvent(`✓ Downloaded ${getPDFDownloadFilename()}`);
     }
-    async function generatePDF() {
-        if (pdf.running || (!pdf.capturedPages.size && !pdf.pages.size)) return;
-        pdf.running = true;
-        pdf.stopRequested = false;
-        const overlay = document.getElementById("psd-inpage-overlay");
-        if (overlay) {
-            overlay.classList.remove("quiet", "idle");
-        }
-        setButtons();
-        const orderedPages = getOrderedCapturedPages();
-        const total = orderedPages.length;
-        const writer = makePDFWriter(total);
-        reportProgress("Preparing…", `${pdf.enableOCR ? "OCR" : "Processing"} page 1 / ${total}`, 50, 0);
-        logProgressEvent(`Generating ${total}-page PDF…`);
+    async function convertCapturedPages(writer, pages) {
+        const total = pages.length;
+        reportProgress("Preparing…", `OCR page 1 / ${total}`, 50);
         let converted = 0;
-        let conversionError = null;
-        for (let index = 0; index < orderedPages.length; index++) {
+        let error = null;
+
+        for (let index = 0; index < total; index++) {
             if (pdf.stopRequested) break;
             try {
-                await convertPageToPDF(writer, orderedPages[index], index, total);
+                await convertPageToPDF(writer, pages[index], index, total);
                 converted++;
                 reportProgress(
                     "Preparing…",
-                    `${pdf.enableOCR ? "OCR" : "Processing"} page ${index + 1} / ${total}`,
-                    50 + ((index + 1) / total) * 50,
-                    converted
+                    `OCR page ${index + 1} / ${total}`,
+                    50 + ((index + 1) / total) * 50
                 );
-                if ((index + 1) % 5 === 0 || index === orderedPages.length - 1) {
-                    logProgressEvent(`✓ Processed ${index + 1}/${total}`);
-                }
-                if ((index + 1) % 5 === 0) await app.sleep(0);
-            } catch (error) {
-                conversionError = error;
-                logProgressEvent(`✕ Page ${index + 1}: ${error.message}`);
+            } catch (conversionError) {
+                error = conversionError;
                 break;
             }
         }
-        if (pdf.stopRequested || converted !== total) {
-            pdf.running = false;
-            setButtons();
+        return { converted, error };
+    }
+
+    async function generatePDF() {
+        if (pdf.status === 'capturing' || pdf.status === 'processing' || (!pdf.capturedPages.size && !pdf.pages.size)) return;
+        pdf.status = 'processing';
+        pdf.stopRequested = false;
+        document.getElementById("psd-inpage-overlay")?.classList.remove("quiet", "idle");
+        app.ui.updateWindowControl();
+
+        const pages = getOrderedCapturedPages();
+        const writer = makePDFWriter(pages.length);
+        const { converted, error } = await convertCapturedPages(writer, pages);
+
+        if (pdf.stopRequested || converted !== pages.length) {
+            pdf.status = 'idle';
+            app.ui.updateWindowControl();
             await shutdownOCRWorker();
             if (pdf.stopRequested) {
                 finishCancelledCapture();
-                logProgressEvent("PDF generation stopped.");
             } else {
-                const reason = conversionError?.message || "A page could not be converted.";
+                const reason = error?.message || "A page could not be converted.";
                 reportProgress(
                     "PDF conversion failed",
-                    `Page ${converted + 1} of ${total}: ${reason}`,
-                    Math.floor(converted / Math.max(1, total) * 100),
-                    converted
+                    `Page ${converted + 1} of ${pages.length}: ${reason}`,
+                    Math.floor(converted / Math.max(1, pages.length) * 100)
                 );
-                const root = document.getElementById("psd-inpage-overlay");
-                root?.classList.remove("completed", "cancelled");
-                logProgressEvent(`PDF conversion stopped after ${converted}/${total} pages: ${reason}`);
+                document.getElementById("psd-inpage-overlay")?.classList.remove("completed", "cancelled");
             }
             return;
         }
-        await finishPDFDownload(writer, converted);
+
+        await finishPDFDownload(writer);
     }
-async function start(options = {}) {
-        if (pdf.running) return;
-        // Restore the original working behavior: OCR is always attempted.
-        // The temporary OCR toggle in the newer overlay could persist a false
-        // value in storage and silently skip the OCR stage. Ignore that setting.
-        pdf.enableOCR = true;
-        pdf.completed = false;
+    async function start() {
+        if (pdf.status === 'capturing' || pdf.status === 'processing') return;
+        pdf.status = 'idle';
         resetProgressUI();
         await preparePDFCapture();
     }
-    function handlePDFCommand(msg) {
-        if (msg.type === "init") {
-            setButtons();
-            if (!app.isDrivePage()) {
-                const root = document.getElementById("psd-inpage-overlay");
-                if (root) root.remove();
-                return;
-            }else if (!currentDriveFileIsPDF()) {
-                showUnsupportedFile();
-            }else {
-                reportProgress("Ready", "", pdf.ready  ? 100: null, pdf.ready  ? 0: 0);
-            }
-        }
-        if (msg.type === "start") start();
-        if (msg.type === "stop") cancel();
-        if (msg.type === "openOverlay") {
-            app.ui.showInPageOverlay(true);
-            app.ui.updateWindowControl();
-        }
-    }
-    // Extension messaging
-    chrome.runtime.onConnect.addListener(port => {
-        if (port.name !== "pdf-downloader") return;
-        pdf.activePort = port;
-        port.onMessage.addListener(handlePDFCommand);
-        port.onDisconnect.addListener(() => {
-            if (pdf.activePort === port) pdf.activePort = null;
-            // Do not reopen the overlay when the popup/port disconnects.
-            app.ui.updateWindowControl();
-        });
-        app.ui.updateWindowControl();
-        handlePDFCommand({
-            type: "init"
-        });
-    });
-
     function cancel() {
-        if (!pdf.running) return;
+        if (pdf.status !== 'capturing' && pdf.status !== 'processing') return;
         pdf.stopRequested = true;
         void shutdownOCRWorker();
     }
 
-    app.pdf = { currentDriveFileIsPDF, start, cancel, consumeAutoStart, scanMenu };
+    app.pdf = { currentDriveFileIsPDF, start, cancel, scanMenu };
 })();
