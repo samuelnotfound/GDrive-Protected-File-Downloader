@@ -36,27 +36,6 @@ To offer a choice of resolutions, the extension briefly drives the player itself
 
 Support for additional file types is currently unplanned.
 
-## Project structure
-
-The source code is grouped by responsibility so the repository root stays easy to browse:
-
-```text
-GDrive-Protected-File-Downloader/
-├── src/
-│   ├── background/          # Service-worker modules
-│   ├── content/
-│   │   ├── drive/            # Drive PDF/video UI and download workflows
-│   │   ├── automation/       # Player automation and quality probing
-│   │   └── media/            # Page-world media/network hooks
-│   ├── offscreen/             # Video staging and FFmpeg processing
-│   └── background.js         # Service-worker entry point
-├── vendor/                   # Bundled OCR and FFmpeg assets
-├── icons/                    # Extension icons
-├── README_assets/            # README screenshots
-├── manifest.json
-└── README.md
-```
-
 ## Installation
 
 1. Download and extract the extension's ZIP file.
