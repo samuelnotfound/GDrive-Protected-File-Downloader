@@ -347,13 +347,13 @@
 
     app.init = function init() {
         app.video?.init();
-        if (app.isDrivePage()) {
-            createInPageOverlay();
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', watchDriveMenus, { once: true });
-            } else {
-                watchDriveMenus();
-            }
+        if (!app.isDrivePage()) return;
+
+        createInPageOverlay();
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', watchDriveMenus, { once: true });
+        } else {
+            watchDriveMenus();
         }
     };
 })();
