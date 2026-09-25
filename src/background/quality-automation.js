@@ -108,3 +108,88 @@ async function openQualitySubmenu(tabId, menuWaitMs = 2500) {
         menu
     };
 }
+
+
+function inspectPlaybackVideos() {
+    const roots = [];
+    const seen = new Set();
+    const queue = [document];
+
+    while (queue.length) {
+        const root = queue.shift();
+        if (!root || seen.has(root)) continue;
+        seen.add(root);
+        roots.push(root);
+        try {
+            for (const element of root.querySelectorAll('*')) {
+                if (element.shadowRoot) queue.push(element.shadowRoot);
+            }
+        } catch (_) {}
+    }
+
+    const videos = [];
+    for (const root of roots) {
+        try { videos.push(...root.querySelectorAll('video')); }
+        catch (_) {}
+    }
+
+    return [...new Set(videos)]
+        .map(video => {
+            try {
+                const rect = video.getBoundingClientRect();
+                const style = getComputedStyle(video);
+                if (
+                    rect.width <= 2 || rect.height <= 2 ||
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    style.opacity === '0' ||
+                    video.ended
+                ) return null;
+
+                const height = Number(video.videoHeight || 0);
+
+                return {
+                    height,
+                    playing: !video.paused,
+                    ready: Number(video.readyState || 0),
+                    area: rect.width * rect.height
+                };
+            } catch (_) {
+                return null;
+            }
+        })
+        .filter(Boolean)
+        .sort((a, b) =>
+            Number(b.playing) - Number(a.playing) ||
+            b.ready - a.ready ||
+            b.area - a.area
+        );
+}
+
+async function getPlayingVideoHeight(tabId) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            func: inspectPlaybackVideos
+        });
+        for (const result of results || []) {
+            const height = Number(result?.result?.[0]?.height || 0);
+            if (height) return height;
+        }
+    } catch (_) {}
+    return 0;
+}
+
+async function detectExistingPlayback(tabId) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            func: inspectPlaybackVideos
+        });
+        return (results || []).some(result => result?.result?.some(video => video.playing));
+    } catch (_) {
+        return false;
+    }
+}

@@ -27,7 +27,6 @@
         "<all_urls>"
       ],
       "js": [
-        "src/content/shared/utils.js",
         "src/content/automation/autoplay.js",
         "src/content/automation/quality-trigger.js"
       ],
@@ -58,18 +57,10 @@
         "https://*.googleusercontent.com/*"
       ],
       "js": [
-        "src/content/shared/utils.js",
         "src/content/drive/ui.js",
-        "src/content/drive/pdf/capture.js",
-        "src/content/drive/pdf/ocr.js",
-        "src/content/drive/pdf/writer.js",
         "src/content/drive/pdf.js",
         "src/content/drive/video-overlay.js",
-        "src/content/drive/video/context.js",
-        "src/content/drive/video/quality-picker.js",
-        "src/content/drive/video/bridge.js",
-        "src/content/drive/video.js",
-        "src/content/drive/bootstrap.js"
+        "src/content/drive/video.js"
       ],
       "run_at": "document_idle",
       "all_frames": true,

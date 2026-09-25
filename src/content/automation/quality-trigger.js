@@ -2,10 +2,35 @@
   if (window.__driveQualityTriggerLoaded) return;
   window.__driveQualityTriggerLoaded = true;
 
-  const { sleep, allRoots, isVisible, mediaElements, areaOf, muteMedia } = window.__PSD_CONTENT_UTILS;
-  const norm = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  const norm = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
 
   const OWN_UI = '#psd-video-quality-picker,#psd-video-scan-blocker,#psd-video-page-blocker,#psd-inpage-overlay';
+
+  function allRoots(root = document, seen = new Set()) {
+    if (!root || seen.has(root)) return [];
+    seen.add(root);
+    const roots = [root];
+    try {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.shadowRoot) roots.push(...allRoots(node.shadowRoot, seen));
+      }
+    } catch (_) {}
+    return roots;
+  }
+
+  function isVisible(el) {
+    if (!el || !(el instanceof Element)) return false;
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      if (el.getAttribute('aria-hidden') === 'true') return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (_) { return false; }
+  }
 
   const isOwnUi = (el) => { try { return !!el.closest?.(OWN_UI); } catch (_) { return false; } };
 
@@ -73,8 +98,19 @@
     return true;
   }
 
+  function mediaElements(selector = 'video') {
+    const out = [];
+    for (const root of allRoots()) {
+      try { out.push(...(root.querySelectorAll?.(selector) || [])); } catch (_) {}
+    }
+    return [...new Set(out)];
+  }
+
+  const areaOf = (el) => { try { const r = el.getBoundingClientRect(); return r.width * r.height; } catch (_) { return 0; } };
+  const mute = (v) => { try { v.muted = true; v.defaultMuted = true; v.volume = 0; v.setAttribute('muted', ''); } catch (_) {} };
+
   function muteAllMediaNow() {
-    for (const media of mediaElements('video, audio')) muteMedia(media);
+    for (const media of mediaElements('video, audio')) mute(media);
   }
 
   let muteGuardCleanup = null;
@@ -91,7 +127,7 @@
 
     const boundRoots = new Set();
     const mutePlayback = event => {
-      if (event?.target?.tagName === 'VIDEO') muteMedia(event.target);
+      if (event?.target?.tagName === 'VIDEO') mute(event.target);
     };
 
     const bindRoots = () => {
@@ -104,7 +140,7 @@
           boundRoots.add(root);
         } catch (_) {}
       }
-      for (const video of mediaElements('video')) muteMedia(video);
+      for (const video of mediaElements('video')) mute(video);
     };
 
     bindRoots();
@@ -209,7 +245,7 @@
   async function play() {
     enableMuteGuard();
     const videos = mediaElements('video');
-    for (const v of videos) muteMedia(v);
+    for (const v of videos) mute(v);
 
     const ordered = videos.slice().sort((a, b) => {
       const ap = (!a.paused && !a.ended) ? 1 : 0, bp = (!b.paused && !b.ended) ? 1 : 0;
@@ -219,11 +255,11 @@
 
     for (const v of ordered) {
       try {
-        muteMedia(v);
+        mute(v);
         const promise = v.play();
         if (promise?.then) await promise.catch(() => {});
         await sleep(250);
-        muteMedia(v);
+        mute(v);
         if (!v.paused && !v.ended) {
           return { ok: true, playing: true, method: 'video.play()', currentTime: Number(v.currentTime || 0) };
         }
@@ -234,7 +270,7 @@
     if (playButton) {
       clickHuman(playButton);
       await sleep(350);
-      for (const v of mediaElements('video')) muteMedia(v);
+      for (const v of mediaElements('video')) mute(v);
       if (mediaElements('video').some(v => !v.paused && !v.ended)) {
         return { ok: true, playing: true, method: 'Play-button click' };
       }
@@ -318,7 +354,7 @@
       const videos = mediaElements('video');
       for (const v of videos) {
         try {
-          muteMedia(v);
+          mute(v);
           if (v.paused) { const p = v.play(); if (p?.catch) p.catch(() => {}); }
         } catch (_) {}
       }
