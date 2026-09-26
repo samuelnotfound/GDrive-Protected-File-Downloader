@@ -1,6 +1,6 @@
 # GDrive Protected File Downloader
 
-A Chrome extension that adds a download button to Google Drive files that have the normal Download option disabled. The extension does not remove permissions or bypass account restrictions.
+A Chrome extension that adds a download button to Google Drive files when the normal **Download** option is disabled. It does not remove permissions or bypass account restrictions.
 
 |                             Before                              |                             After                             |
 | :-------------------------------------------------------------: | :-----------------------------------------------------------: |
@@ -11,76 +11,73 @@ The extension adds a **Download** entry directly to the existing Google Drive me
 
 ## Features
 
-- Adds a **Download** button when the normal Google Drive download option is disabled.
-- Saves **view-only PDF and video files** as downloadable files.
-- Makes generated PDFs **text-searchable using OCR**.
-- Processes PDF content and video files locally in the browser.
-- Detects the available video resolutions through the Drive player's own Settings → Quality menu.
-- Runs directly as a Chrome extension.
+- Adds a **Download** button when Google Drive’s normal download option is disabled
+- Saves **view-only PDF** and **video** files as downloadable files
+- Processes PDF pages and video streams **locally in the browser**
+- Detects available video resolutions via the Drive player’s **Settings → Quality** menu
+- Runs as a standard Chrome extension (Manifest V3)
 
 ## How does it work?
 
-This tool is a workaround for content that your browser can already view. It does not directly download the original protected file.
 
 When the extension detects that downloading is disabled and that the file type is supported, it adds a custom download button to the Google Drive interface and processes the content according to its file type.
 
 ### PDF
 
-The extension captures the pages as they are rendered in the Google Drive viewer and combines them into a new PDF file. When OCR is enabled, it reads the text from each captured page and adds searchable text to the generated PDF.
+The extension captures each page as it is rendered in the Google Drive viewer (one sequential pass), then builds a downloadable PDF from those page images.
 
 ### Video
 
-When a video is played, Google Drive provides the video and audio separately to the video player. The extension detects those streams, downloads them, and automatically combines them into a single video file using FFmpeg.
-
-To offer a choice of resolutions, the extension briefly drives the player itself: it starts muted playback, opens the player's own **Settings → Quality** menu, and selects each listed resolution so Drive requests the matching stream. The trigger finds the player's controls by their accessible labels across documents and open shadow roots and activates them with ordinary DOM clicks.
+Google Drive often serves video and audio as separate streams. The extension detects those streams, downloads them, and merges them into a single MP4 using **mp4-remux** (a small pure-JS remuxer that copies streams as-is, similar in idea to `ffmpeg -c copy`).
 
 Support for additional file types is currently unplanned.
 
-## Installation
+## Install
 
-1. Download and extract the extension's ZIP file.
-2. Open Chrome and go to `chrome://extensions/`.
-3. Enable **Developer mode** in the top-right corner.
-4. Click **Load unpacked**.
-5. Select the extracted extension folder.
-6. The extension should now appear in your Chrome extensions list.
+1. Download or unpack this extension folder.
+2. Open `chrome://extensions`.
+3. Enable **Developer mode**.
+4. Click **Load unpacked** and select the extension folder.
 
 ## Usage
 
-1. Open the protected/view-only file in Google Drive.
-2. Open **File**.
-3. Click **Download** under **GDrive Protected File Downloader**.
-4. The extension starts the download workflow.
+1. Open a view-only PDF or video on Google Drive.
+2. Open the **File** menu.
+3. Choose the extension’s **Download** item.
+4. Follow the on-screen overlay (capture / quality picker / progress).
 
-For files opened through Google Classroom, use **File → Open → Open in new tab** first, then open the Google Drive **File** menu.
+For files opened through Google Classroom, use **File → Open → Open in new tab** first, then use the Google Drive **File** menu.
 
-**Important:** The quality probe temporarily blocks page interaction while it drives the Google Drive player. The page is released as soon as the quality picker is ready.
+**Note:** While quality detection runs, the page is dimmed and a small overlay is shown (with Cancel). Interaction is restored when the quality picker is ready.
 
 ## Limitations
 
-- PDF output quality depends on the resolution and rendering quality provided by Google Drive.
-- OCR accuracy depends on the clarity, resolution, language, and formatting of the rendered pages.
-- Processing large files can use noticeable system resources and may take some time.
-- Video download quality is limited to the streams and resolutions made available by Google Drive.
-- Changes to Google Drive's player, viewer, or internal behavior may affect compatibility.
+- PDF quality depends on the resolution Google Drive renders in the viewer.
+- Large files can use significant memory and take longer to process.
+- Video quality is limited to the streams and resolutions Drive actually exposes.
+- Changes to Google Drive’s player, viewer, or network behavior may break compatibility.
+- Leaving the PDF viewer tab mid-capture can still interrupt page capture.
 
 ## Credits
 
-- **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference material for the Google Drive video download workflow, including handling separate video and audio streams.
-- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference material for the Google Drive view-only PDF workflow used by this project.
+### Workflow references
+
+- **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference for the Google Drive video download flow (separate video/audio streams).
+- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference for the view-only PDF capture workflow.
   - **[mhsohan/How-to-download-protected-view-only-files-from-google-drive-](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)**
   - **[zeltox/Google-Drive-PDF-Downloader](https://github.com/zeltox/Google-Drive-PDF-Downloader)**
 
-- **[Tesseract.js](https://github.com/naptha/tesseract.js)** — bundled engine used for client-side OCR.
-- **[FFmpeg WebAssembly](https://www.npmjs.com/package/@ffmpeg/core)** — bundled media processor used to combine separate video and audio streams into a single file.
+### Bundled library
 
-Please refer to the original projects for their licenses, source code, and notices.
+- **[mp4-remux](https://github.com/mscststs/mp4-remux)** — tiny pure-JS tool used to merge separate video and audio MP4 streams without re-encoding.
+
+Please refer to those projects for their licenses, source, and notices.
 
 ## Disclaimer
 
-- This project was built with the assistance of AI tools during development, debugging, refactoring, and documentation.
-- It does not remove access restrictions, bypass authentication, or grant access to files that the user cannot already view.
-- Do not use this extension to circumvent access controls, permissions, copyright restrictions, or other restrictions imposed by the owner of a file.
-- You are responsible for complying with Google Drive's Terms of Service and any applicable copyright, privacy, and other laws.
+- This project was built with assistance from AI tools during development, debugging, refactoring, and documentation.
+- It does not remove access restrictions, bypass authentication, or grant access to files the user cannot already view.
+- Do not use this extension to circumvent access controls, permissions, copyright, or other restrictions set by the file owner.
+- You are responsible for complying with Google Drive’s Terms of Service and applicable law.
 
 This project is provided as-is.

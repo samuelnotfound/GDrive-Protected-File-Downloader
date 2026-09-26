@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GDrive View-Only PDF & Video Downloader",
-  "version": "1.85.1",
-  "description": "Downloads view-only Google Drive PDFs and videos. DOM-based quality detection, compact inline Material quality picker, automatic audio selection and PDF OCR pipeline.",
+  "version": "1.86.0",
+  "description": "Downloads view-only Google Drive PDFs and videos.",
   "permissions": [
     "scripting",
     "storage",
@@ -14,12 +14,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "GDrive PDF & Video Downloader",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
+    "default_title": "GDrive PDF & Video Downloader"
   },
   "content_scripts": [
     {
@@ -27,9 +22,7 @@
         "<all_urls>"
       ],
       "js": [
-        "src/content/shared/utils.js",
-        "src/content/automation/autoplay.js",
-        "src/content/automation/quality-trigger.js"
+        "content-automation.js"
       ],
       "run_at": "document_idle",
       "all_frames": true,
@@ -42,8 +35,7 @@
         "<all_urls>"
       ],
       "js": [
-        "src/content/media/network-bridge.js",
-        "src/content/media/media-mute-guard.js"
+        "content-main.js"
       ],
       "run_at": "document_start",
       "all_frames": true,
@@ -58,18 +50,7 @@
         "https://*.googleusercontent.com/*"
       ],
       "js": [
-        "src/content/shared/utils.js",
-        "src/content/drive/ui.js",
-        "src/content/drive/pdf/capture.js",
-        "src/content/drive/pdf/ocr.js",
-        "src/content/drive/pdf/writer.js",
-        "src/content/drive/pdf.js",
-        "src/content/drive/video-overlay.js",
-        "src/content/drive/video/context.js",
-        "src/content/drive/video/quality-picker.js",
-        "src/content/drive/video/bridge.js",
-        "src/content/drive/video.js",
-        "src/content/drive/bootstrap.js"
+        "content-drive.js"
       ],
       "run_at": "document_idle",
       "all_frames": true,
@@ -78,19 +59,17 @@
     }
   ],
   "background": {
-    "service_worker": "src/background.js"
+    "service_worker": "background.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    "extension_pages": "script-src 'self'; object-src 'self'"
   },
   "web_accessible_resources": [
     {
       "resources": [
-        "vendor/*"
+        "mux-worker.js"
       ],
       "matches": [
-        "https://drive.google.com/*",
-        "https://*.drive.google.com/*",
         "<all_urls>"
       ]
     }
