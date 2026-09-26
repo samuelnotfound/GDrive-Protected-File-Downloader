@@ -2,6 +2,7 @@ importScripts(
     'background/config.js',
     'background/runtime.js',
     'background/network-capture.js',
+    'background/playback-inspection.js',
     'background/drive-automation.js',
     'background/quality-dom.js',
     'background/format-catalog.js',
