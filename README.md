@@ -2,6 +2,9 @@
 
 **This does not remove permissions or bypass account restrictions.**
 
+> [!WARNING]
+> **Legal Disclaimer:** This tool is provided strictly for educational purposes and personal use. Users are entirely responsible for ensuring they have the legal right to download any content and must comply with Google Drive's Terms of Service. The creator of this repository assumes no liability for how this tool is used, nor any consequences resulting from its use.
+
 ## Features
 
 - Automatically adds a **Download** button to the File menu when Google Drive’s normal download option is disabled
@@ -35,6 +38,10 @@ Support for additional file types is currently unplanned.
 4. Follow the on-screen overlay (capture / quality picker / progress).
 
 For files opened through Google Classroom, use **File → Open → Open in new tab** first, then use the Google Drive **File** menu.
+
+## Issues
+- PDF quality looks blurry — Zoom the document to 200% (or higher) before capturing.
+- Other problems — A page refresh usually resolves them.
 
 ## Limitations
 
