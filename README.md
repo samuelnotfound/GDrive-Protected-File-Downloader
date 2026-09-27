@@ -16,7 +16,7 @@ The extension captures each page as it is rendered in the Google Drive viewer, t
 
 ### Video
 
-Google Drive serves video and audio as separate streams. The extension detects those streams, downloads them, and merges them into a single MP4 file.
+Google Drive serves video and audio as separate streams to the video player. The extension detects those streams, downloads them, and merges them into a single MP4 file.
 
 Support for additional file types is currently unplanned.
 
