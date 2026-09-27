@@ -408,6 +408,11 @@
                 if (detail) detail.textContent = 'Checking download speed…';
             } else if (msg.warmup.phase === 'done') {
                 if (title) title.textContent = 'Downloading Stream';
+                if (detail) {
+                    detail.textContent = combinedTotal()
+                        ? `Estimated Size: ${formatBytes(combinedTotal())}`
+                        : 'Downloading…';
+                }
             } else if (msg.warmup.remainingSec > 0) {
                 if (title) title.textContent = 'Downloading Stream';
                 if (detail) {
