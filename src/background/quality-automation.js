@@ -12,99 +12,152 @@ async function resumePlaybackAfterQualitySwitch(tabId) {
     return rows.some(row => row.value?.ok);
 }
 
-async function waitForQualityMenuClosed(tabId, timeoutMs = 900) {
+async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = false) {
     const deadline = Date.now() + timeoutMs;
-    let last = [];
-    do {
-        last = await listQualityOptions(tabId);
-        if (!last.length) return { closed: true };
-        await sleep(80);
-    } while (Date.now() < deadline);
-    return { closed: false, stillListed: last.map(o => Number(o.height)) };
+    while (Date.now() < deadline) {
+        if (reveal) {
+            try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+        }
+        const hit = firstOk(await runQualityDom(tabId, 'clickLabel', {
+            labels, contains: false, reveal: !!reveal
+        }));
+        if (hit?.value?.ok) {
+            return { ok: true, frameId: hit.frameId, label: hit.value.label || labelName };
+        }
+        await sleep(FAST_SCAN.menuPollMs);
+    }
+    return { ok: false, reason: `Could not find ${labelName}.` };
+}
+
+/**
+ * Click a quality row and require it to actually select (aria-checked).
+ * Uses both clickLabel and clickQuality for reliability.
+ */
+async function selectQualityVerified(tabId, label, height, timeoutMs) {
+    const candidates = [label, `${label} resolution`, `${label} quality`, `${height}p`];
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        // Prefer dedicated clickQuality (role=menuitemradio matching).
+        const viaQuality = firstOk(await runQualityDom(tabId, 'clickQuality', {
+            height: Number(height) || 0,
+            label,
+            mode: 'click'
+        }));
+        if (viaQuality?.value?.ok) {
+            await sleep(FAST_SCAN.optionClickSettleMs);
+            // Confirm selected if the trigger reports it; otherwise accept the click.
+            if (viaQuality.value.selected !== false) {
+                return { ok: true, frameId: viaQuality.frameId, label: viaQuality.value.label || label, method: 'clickQuality' };
+            }
+        }
+
+        const viaLabel = firstOk(await runQualityDom(tabId, 'clickLabel', {
+            labels: candidates, contains: false, reveal: false
+        }));
+        if (viaLabel?.value?.ok) {
+            await sleep(FAST_SCAN.optionClickSettleMs);
+            return { ok: true, frameId: viaLabel.frameId, label: viaLabel.value.label || label, method: 'clickLabel' };
+        }
+        await sleep(FAST_SCAN.menuPollMs);
+    }
+    return { ok: false, reason: `Could not select ${label}.` };
+}
+
+/**
+ * Full sequence for one quality — same shape as mini plugin, with verification.
+ */
+async function applyQualityLikeMini(tabId, label, height = 0) {
+    await closePlayerMenu(tabId);
+    await sleep(FAST_SCAN.optionSettleMs);
+
+    try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+
+    const settings = await clickMenuLikeMini(
+        tabId, TRIGGER_SETTINGS_LABELS, 'Settings', FAST_SCAN.settingsTimeoutMs, true
+    );
+    if (!settings.ok) return { ok: false, step: 'settings', reason: settings.reason };
+    await sleep(FAST_SCAN.settingsClickSettleMs);
+
+    const quality = await clickMenuLikeMini(
+        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false
+    );
+    if (!quality.ok) return { ok: false, step: 'quality-row', reason: quality.reason };
+    await sleep(FAST_SCAN.qualityClickSettleMs);
+
+    // Confirm quality options are visible before clicking a row.
+    const listed = await listQualityOptions(tabId);
+    const want = Number(height) || 0;
+    if (want && listed.length && !listed.some(o => Number(o.height) === want)) {
+        return { ok: false, step: 'quality-missing', reason: `${label} not in open Quality menu.` };
+    }
+
+    const selected = await selectQualityVerified(tabId, label, height, FAST_SCAN.qualityTimeoutMs);
+    if (!selected.ok) return { ok: false, step: 'quality-option', reason: selected.reason };
+
+    return { ok: true, method: selected.method || 'mini-sequence', settings, quality, selected, label };
 }
 
 async function activateQualityRow(tabId, targetHeight, freshOptions = [], opts = {}) {
     const height = Number(targetHeight);
-    const waitMenuMs = Number(opts?.waitMenuMs) > 0 ? Number(opts.waitMenuMs) : 900;
-    const immediateSuccess = opts?.immediateSuccess === true;
+    const fromOptions = (Array.isArray(freshOptions) ? freshOptions : [])
+        .find(x => Number(x.height) === height);
+    const text = String(fromOptions?.text || fromOptions?.label || `${height}p`).trim();
 
-    let options = await listQualityOptions(tabId);
-    if (!options.length) options = Array.isArray(freshOptions) ? freshOptions : [];
-    const target = options.find(x => Number(x.height) === height);
-    if (!target) return { ok: false, reason: `${height}p is not in the live Quality menu.`, attempts: [] };
-
-    const attempts = [];
-    for (const mode of ['click', 'keyboard', 'events']) {
-        let result;
-        try { result = await clickQualityRowInDom(tabId, target, height, mode); }
-        catch (error) { result = { ok: false, reason: error?.message || String(error) }; }
-        const entry = { method: mode, ...result };
-        attempts.push(entry);
-        if (!result?.ok) continue;
-        if (immediateSuccess) return { ok: true, method: mode, height, attempts };
-        const wait = await waitForQualityMenuClosed(tabId, mode === 'click' ? waitMenuMs : Math.min(waitMenuMs, 260));
-        entry.menuClosed = wait.closed;
-        if (wait.closed) return { ok: true, method: mode, height, attempts };
+    const applied = await applyQualityLikeMini(tabId, text, height);
+    if (applied.ok) {
+        return {
+            ok: true,
+            method: applied.method,
+            height,
+            label: text,
+            attempts: [{ method: applied.method, ok: true, label: text }]
+        };
     }
     return {
-        ok: false, height, attempts,
-        reason: `${height}p was not activated: the Quality menu stayed open after ${attempts.map(a => a.method).join(', ')}.`
+        ok: false,
+        height,
+        label: text,
+        reason: applied.reason || `${text} could not be activated.`,
+        attempts: [{ method: 'mini-sequence', ok: false, reason: applied.reason, step: applied.step }]
     };
 }
 
 async function openQualitySubmenu(tabId, menuWaitMs = 2500) {
-    let options = await listQualityOptions(tabId);
-    if (options.length) return { ok: true, options, path: 'already-open' };
+    await closePlayerMenu(tabId);
+    await sleep(FAST_SCAN.optionSettleMs);
+    try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
 
-    let settings = null;
-    let menu = null;
-
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        settings = await openPlayerSettingsMenu(tabId);
-        if (!settings?.ok) {
-            await sleep(FAST_SCAN.retrySettleMs);
-            continue;
-        }
-
-        menu = settings.afterSettings || null;
-        if (!menu?.qualityTarget?.ok) {
-            menu = await waitForQualityMenuRow(tabId, menuWaitMs);
-        }
-        if (!menu?.qualityTarget?.ok) {
-            await sleep(FAST_SCAN.retrySettleMs);
-            continue;
-        }
-
-        const opened = await clickQualityMenuRow(tabId, menu.qualityTarget);
-        if (!opened?.ok) {
-            await sleep(FAST_SCAN.retrySettleMs);
-            continue;
-        }
-
-        const deadline = Date.now() + Math.max(menuWaitMs, FAST_SCAN.menuTimeoutMs);
-        do {
-            options = await listQualityOptions(tabId);
-            if (options.length) {
-                return {
-                    ok: true,
-                    options,
-                    settings,
-                    menu,
-                    opened,
-                    path: 'settings-click',
-                    attempt
-                };
-            }
-            await sleep(FAST_SCAN.menuPollMs);
-        } while (Date.now() < deadline);
+    const settings = await clickMenuLikeMini(
+        tabId, TRIGGER_SETTINGS_LABELS, 'Settings', FAST_SCAN.settingsTimeoutMs, true
+    );
+    if (!settings.ok) {
+        return { ok: false, reason: settings.reason || 'Settings not found.', settings };
     }
+    await sleep(FAST_SCAN.settingsClickSettleMs);
+
+    const quality = await clickMenuLikeMini(
+        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false
+    );
+    if (!quality.ok) {
+        return { ok: false, reason: quality.reason || 'Quality row not found.', settings, quality };
+    }
+    await sleep(FAST_SCAN.qualityClickSettleMs);
+
+    const deadline = Date.now() + Math.max(menuWaitMs, FAST_SCAN.menuTimeoutMs);
+    let options = [];
+    do {
+        options = await listQualityOptions(tabId);
+        if (options.length) {
+            options = options.slice().sort((a, b) => Number(b.height) - Number(a.height));
+            return { ok: true, options, settings, quality, path: 'mini-settings-quality' };
+        }
+        await sleep(FAST_SCAN.menuPollMs);
+    } while (Date.now() < deadline);
 
     return {
         ok: false,
-        reason: settings?.ok
-            ? 'Settings opened, but the Quality submenu did not expose any resolution options.'
-            : 'The Drive Settings control could not be clicked.',
+        reason: 'Quality submenu opened but no resolution options were found.',
         settings,
-        menu
+        quality
     };
 }

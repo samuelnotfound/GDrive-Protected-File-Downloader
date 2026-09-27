@@ -89,9 +89,15 @@ function parseStreamCandidate(url, originalUrl = url) {
             '34':[640,360], '35':[854,480], '37':[1920,1080], '43':[640,360],
             '44':[854,480], '45':[1280,720], '46':[1920,1080], '59':[854,480]
         };
-        const dims = ITAG_DIMS[itag] || [0,0];
-        const width = Number(p.get('width')) || Number(dims[0]) || 0;
-        const height = Number(p.get('height')) || Number(dims[1]) || 0;
+        const dims = ITAG_DIMS[itag] || [0, 0];
+        const urlWidth = Number(p.get('width')) || 0;
+        const urlHeight = Number(p.get('height')) || 0;
+        // Prefer explicit width/height query params. Only fall back to the itag
+        // table when the URL itself does not declare dimensions — and mark that
+        // source so the picker can refuse to treat it as a confirmed quality.
+        const fromUrl = urlWidth > 0 || urlHeight > 0;
+        const width = urlWidth || Number(dims[0]) || 0;
+        const height = urlHeight || Number(dims[1]) || 0;
         const streamFileId = p.get('driveid') || p.get('driveId') || p.get('fileid') || p.get('fileId') || p.get('docid') || '';
         return {
             id: `captured:${p.get('itag') || ''}:${formatHash(cleanURL(url))}`,
@@ -102,7 +108,7 @@ function parseStreamCandidate(url, originalUrl = url) {
             itag,
             width,
             height,
-            heightSource: height ? 'url' : '',
+            heightSource: height ? (fromUrl ? 'url' : (itag && dims[1] ? 'itag' : '')) : '',
             contentLength: clen,
             codecs: p.get('codecs') || '',
             capturedAt: Date.now()

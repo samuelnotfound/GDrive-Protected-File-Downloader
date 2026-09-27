@@ -5,7 +5,7 @@
 
     const { isVisible, mediaElements, areaOf, muteMedia } = window.__PSD_CONTENT_UTILS;
 
-    function waitForPlayingVideo(videos, timeoutMs = 900) {
+    function waitForPlayingVideo(videos, timeoutMs = 400) {
         const targets = Array.isArray(videos) ? videos : [];
         const deadline = Date.now() + timeoutMs;
 

@@ -149,11 +149,21 @@ async function refreshStaleFormats(session, tabId) {
 function selectFormats(session, request) {
     const formats = session?.formats || { video: [], audio: [], progressive: [] };
     const find = (list, id) => Array.isArray(list) ? list.find(item => item?.id === id) : null;
+    const wantHeight = Number(request?.qualityHeight || 0);
 
-    const selectedProgressive = find(formats.progressive, request.progressiveFormatId);
+    const selectedProgressive = find(formats.progressive, request.progressiveFormatId)
+        || (wantHeight
+            ? (formats.progressive || []).find(item =>
+                Number(item?.qualityHeight || item?.height || 0) === wantHeight && item?.url)
+            : null);
     if (selectedProgressive) return { mode: 'single', media: selectedProgressive };
 
-    let video = find(formats.video, request.videoFormatId);
+    // Prefer the stream whose qualityHeight matches the menu row the user picked.
+    let video = wantHeight
+        ? (formats.video || []).find(item =>
+            Number(item?.qualityHeight || item?.height || 0) === wantHeight && item?.url)
+        : null;
+    if (!video) video = find(formats.video, request.videoFormatId);
     let audio = find(formats.audio, request.audioFormatId);
     if (!video && formats.video?.length) video = formats.video[0];
     if (!audio && formats.audio?.length) audio = formats.audio[0];

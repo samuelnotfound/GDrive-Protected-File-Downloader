@@ -222,7 +222,7 @@
         muteMedia(v);
         const promise = v.play();
         if (promise?.then) await promise.catch(() => {});
-        await sleep(250);
+        await sleep(80);
         muteMedia(v);
         if (!v.paused && !v.ended) {
           return { ok: true, playing: true, method: 'video.play()', currentTime: Number(v.currentTime || 0) };
@@ -233,14 +233,14 @@
     const playButton = findExact(['play', 'play video', 'playback', 'start playback']);
     if (playButton) {
       clickHuman(playButton);
-      await sleep(350);
+      await sleep(120);
       for (const v of mediaElements('video')) muteMedia(v);
       if (mediaElements('video').some(v => !v.paused && !v.ended)) {
         return { ok: true, playing: true, method: 'Play-button click' };
       }
     }
 
-    await sleep(400);
+    await sleep(100);
     const started = mediaElements('video').some(v => !v.paused && !v.ended && (v.currentTime > 0 || v.readyState >= 3));
     return { ok: started, playing: started, method: started ? 'play state confirmation' : 'exhausted', videoCount: videos.length };
   }
@@ -269,19 +269,31 @@
       return { ok: !!el, found: !!el, label: el ? labelOf(el).slice(0, 60) : '' };
     },
 
+    // Mirror Drive Quality Trigger: read the live Quality submenu labels
+    // (menuitemradio / menuitem / option) instead of assuming fixed heights.
     scanQualities: () => {
       const byLabel = new Map();
       for (const row of qualityRows()) {
         const key = row.label.toLowerCase();
         const previous = byLabel.get(key);
         if (!previous || row.selected) {
-          byLabel.set(key, { label: row.label, text: row.label, height: row.height, role: row.role, selected: row.selected });
+          byLabel.set(key, {
+            label: row.label,
+            text: row.label,
+            height: row.height,
+            role: row.role,
+            selected: row.selected
+          });
         }
       }
       const options = [...byLabel.values()];
+      // Downloadable rows only (numeric heights). "Auto" stays in labels for diagnostics.
+      const downloadable = options
+        .filter(o => Number(o.height) > 0)
+        .sort((a, b) => Number(b.height) - Number(a.height));
       return {
         ok: true,
-        options: options.filter(o => o.height > 0).sort((a, b) => b.height - a.height),
+        options: downloadable,
         labels: options.map(o => o.label)
       };
     },
@@ -302,14 +314,66 @@
       }
       if (!el) return { ok: false, found: false, reason: `${wantedHeight}p is not listed in this frame.` };
 
-      const done = mode === 'keyboard' ? pressEnter(el) : mode === 'events' ? dispatchClick(el) : clickHuman(el);
-      return { ok: !!done, found: true, mode, label: labelOf(el).slice(0, 60) };
+      // Always fire a real click — even if this row is already selected.
+      // (Skipping the already-selected row is what made 480p look like a no-op.)
+      let done = false;
+      if (mode === 'keyboard') {
+        done = pressEnter(el);
+      } else if (mode === 'events') {
+        done = dispatchClick(el);
+      } else {
+        done = clickHuman(el);
+        // Also dispatch full event sequence so Drive registers the choice
+        // when the row was already aria-checked.
+        dispatchClick(el);
+        done = true;
+      }
+
+      const selected = el.getAttribute('aria-checked') === 'true'
+        || el.getAttribute('aria-selected') === 'true'
+        || el.getAttribute('aria-current') === 'true';
+      return {
+        ok: !!done,
+        found: true,
+        mode,
+        label: labelOf(el).slice(0, 60),
+        selected,
+        height: wantedHeight,
+        wasAlreadySelected: selected
+      };
+    },
+
+    // After a quality switch, nudge currentTime so the player must fetch a new
+    // media segment for the newly selected itag instead of reusing the buffer.
+    nudgePlayback: ({ seconds = 0.35 } = {}) => {
+      enableMuteGuard();
+      let nudged = false;
+      for (const v of mediaElements('video')) {
+        try {
+          muteMedia(v);
+          const duration = Number(v.duration);
+          const current = Number(v.currentTime || 0);
+          if (Number.isFinite(duration) && duration > 1) {
+            const next = Math.min(duration - 0.05, current + Math.max(0.15, Number(seconds) || 0.35));
+            if (next > current + 0.05) {
+              v.currentTime = next;
+              nudged = true;
+            }
+          }
+          if (v.paused) {
+            const p = v.play();
+            if (p?.catch) p.catch(() => {});
+          }
+        } catch (_) {}
+      }
+      return { ok: true, nudged };
     },
 
     closeMenu: () => {
       const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true };
       try { document.dispatchEvent(new KeyboardEvent('keydown', init)); } catch (_) {}
       try { document.dispatchEvent(new KeyboardEvent('keyup', init)); } catch (_) {}
+      try { document.body?.click(); } catch (_) {}
       return { ok: true };
     },
 

@@ -246,20 +246,95 @@ async function performQualityScan(tabId, fileId) {
         const result = await scanQualities(tabId, fileId);
         if (!result?.success) return result || { success: false, error: 'Trusted Drive quality scan failed.' };
 
+        // Prefer heights confirmed by the live Quality menu / probe pairs.
+        // qualityHeight (set when we click a menu row) beats raw height (which
+        // may still carry an itag-table guess). Never invent resolutions that
+        // were not on the menu.
+        const menuOptions = Array.isArray(result.quality?.options) ? result.quality.options : [];
+        const menuHeights = new Set(
+            menuOptions
+                .map(option => Number(option?.height || 0))
+                .filter(height => height > 0)
+        );
+
+        // Prefer explicit qualityStreams pairs when present — each pair is
+        // already keyed to a real menu height from the probe loop.
+        const pairVideos = (Array.isArray(result.qualityStreams) ? result.qualityStreams : [])
+            .map(pair => {
+                const video = pair?.video;
+                if (!video?.url) return null;
+                const height = Number(pair.height || video.qualityHeight || video.height || 0);
+                if (!height) return null;
+                return {
+                    ...video,
+                    height,
+                    qualityHeight: height,
+                    probeQuality: video.probeQuality || `${height}p`
+                };
+            })
+            .filter(Boolean);
+
+        const rawVideo = Array.isArray(result.formats?.video) ? result.formats.video : [];
+        const normalizeHeight = stream => {
+            const h = Number(stream?.qualityHeight || stream?.height || 0);
+            if (!h) return null;
+            return {
+                ...stream,
+                height: h,
+                qualityHeight: h
+            };
+        };
+
+        let menuScopedVideo;
+        if (pairVideos.length) {
+            // Probe pairs are authoritative when the scan captured them.
+            menuScopedVideo = pairVideos;
+            // Fill any menu heights still missing from pairs with raw captures.
+            const have = new Set(pairVideos.map(s => Number(s.height)));
+            for (const stream of rawVideo) {
+                const normalized = normalizeHeight(stream);
+                if (!normalized) continue;
+                if (have.has(normalized.height)) continue;
+                if (menuHeights.size && !menuHeights.has(normalized.height)) continue;
+                menuScopedVideo.push(normalized);
+                have.add(normalized.height);
+            }
+        } else if (menuHeights.size) {
+            menuScopedVideo = rawVideo
+                .map(normalizeHeight)
+                .filter(stream => stream && menuHeights.has(stream.height));
+        } else {
+            menuScopedVideo = rawVideo.map(normalizeHeight).filter(Boolean);
+        }
+
         const scannedFormats = {
-            video: mergeFormatLists([], result.formats?.video, byHeightWidthThenSize),
+            video: mergeFormatLists([], menuScopedVideo, byHeightWidthThenSize),
             audio: dedupeAudioFormats(mergeFormatLists([], result.formats?.audio, bySizeDesc)),
             progressive: []
         };
+        // Persist first, but ALWAYS return/send the in-memory scannedFormats.
+        // Re-reading the session can race with concurrent stream updates and
+        // hand the picker an empty or stale formats object.
         await storeScannedFormats(tabId, fileId, scannedFormats);
 
         const latest = await getStoredSession(tabId);
-        const formats = latest?.formats || scannedFormats;
-        await sendTab(tabId, { type: 'videoFormatsDetected', formats, fileId, viewerSessionId: latest?.viewerSessionId || '' });
+        const formats = scannedFormats;
+        await sendTab(tabId, {
+            type: 'videoFormatsDetected',
+            formats,
+            fileId,
+            viewerSessionId: latest?.viewerSessionId || '',
+            quality: result.quality || { options: menuOptions },
+            qualityOptions: menuOptions
+        });
         return {
             success: true,
             formats,
-            scanReport: result.scanReport || []
+            scanReport: result.scanReport || [],
+            quality: result.quality || { options: menuOptions },
+            qualityOptions: menuOptions,
+            qualityStreams: result.qualityStreams || [],
+            observedQualityLabels: result.observedQualityLabels || []
         };
     } catch (error) {
         return { success: false, error: error?.message || 'Trusted Drive quality scan failed.' };

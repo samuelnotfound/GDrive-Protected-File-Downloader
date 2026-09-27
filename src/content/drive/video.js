@@ -217,9 +217,16 @@
         const formats = response?.success ? response.formats : null;
         if (!formats || (!formats.video?.length && !formats.progressive?.length)) return false;
 
+        const menuOptions =
+            response?.quality?.options ||
+            response?.qualityOptions ||
+            response?.observedQualityOptions ||
+            null;
+
         await quality.show(
             formats,
-            quality.describeScanReport(response.scanReport, '')
+            quality.describeScanReport(response.scanReport, ''),
+            menuOptions
         );
         rememberCompletedScan(response.scanReport);
         return true;
@@ -253,13 +260,7 @@
             const response = await core.sendRuntime({ action: 'automatedQualityScan', fileId: video.fileId });
             if (await showDetectedQuality(response)) return;
             if (await showCapturedQualityFallback()) return;
-
-            console.warn(
-                '[GDrive Downloader] quality detection did not produce a usable stream:',
-                response?.error || 'No captured fallback stream.'
-            );
         } catch (error) {
-            console.error('[GDrive Downloader] video quality detection failed:', error);
         }
 
         quality.resetScanUI();
@@ -272,7 +273,11 @@
         if (cachedScanUsable() || core.hasUsableFormats(video.pickerFormats)) {
             app.ui.closeDriveFileMenu();
             video.operation = 'picker';
-            await quality.show(video.pickerFormats || video.formats, video.scanCache?.note || '');
+            await quality.show(
+                video.pickerFormats || video.formats,
+                video.scanCache?.note || '',
+                video.scanCache?.menuOptions || video.qualityMenuOptions || null
+            );
             return;
         }
 
@@ -390,6 +395,21 @@
 
         if (message.type === 'videoFormatsDetected') {
             video.formats = message.formats || { video: [], audio: [], progressive: [] };
+            // Apply menu options in the same tick as formats so the picker
+            // never renders formats against a stale/empty menu snapshot.
+            const menu =
+                message.quality?.options ||
+                message.qualityOptions ||
+                null;
+            if (Array.isArray(menu) && menu.length) {
+                video.qualityMenuOptions = menu
+                    .map(option => ({
+                        height: Number(option?.height || 0),
+                        label: String(option?.text || option?.label || '').trim(),
+                        text: String(option?.text || option?.label || '').trim()
+                    }))
+                    .filter(option => option.height > 0);
+            }
         } else if (message.formats) {
             video.formats = message.formats;
         }
@@ -448,6 +468,14 @@
     function finishVideoStage(stage, message) {
         videoOverlay.clearJob();
         video.operation = 'idle';
+        // After cancel/complete, keep quality list so opening Download shows picker again
+        // without re-running quality detection (until page refresh / file change).
+        if (core.hasUsableFormats(video.pickerFormats) || core.hasUsableFormats(video.formats)) {
+            video.restorePickerOnFileMenuOpen = true;
+            if (!video.pickerFormats && video.formats) {
+                video.pickerFormats = core.cloneFormats(video.formats);
+            }
+        }
         updateVideoMenuState();
         videoOverlay.update({ stage, ...(message ? { message } : {}) });
     }
@@ -463,15 +491,17 @@
         if (message.type === 'videoStagePreload') {
             const job = videoOverlay.getJobId();
             const stage = videoOverlay.getStage();
-            const conflictingJob = job && job !== message.jobId && !['ready', 'cancelled', 'error'].includes(stage);
+            // Allow a new jobId to take over (slow-start restart creates a fresh job).
+            // Only ignore preload when it's the same job already past the download stage.
             const sameJobWrongStage = job === message.jobId && stage !== 'download';
-            if (conflictingJob || sameJobWrongStage) return;
+            if (sameJobWrongStage) return;
 
             videoOverlay.show(
                 true,
                 message.jobId || null,
                 message.videoBytes || message.mediaBytes || 0,
-                message.audioBytes || 0
+                message.audioBytes || 0,
+                video.lastSelectedQuality || ''
             );
             return;
         }

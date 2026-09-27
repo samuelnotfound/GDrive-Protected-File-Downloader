@@ -266,8 +266,9 @@
 
     const pageInputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
 
-    async function goToPage(pageNumber, waitMs = PAGE_NAV_WAIT) {
-        if (pdf.stopRequested) return false;
+    async function goToPage(pageNumber, waitMs = PAGE_NAV_WAIT, options = {}) {
+        // Allow forced navigation (e.g. return to page 1 after cancel) even when stopRequested.
+        if (pdf.stopRequested && !options.force) return false;
 
         let info = getPageInput();
         if (!info) info = getPageInput(true);
@@ -501,11 +502,16 @@
         pdf.status = 'cancelled';
         app.ui.updateWindowControl();
 
+        // Return the Drive viewer to page 1 after cancel.
+        void goToPage(1, PAGE_NAV_WAIT, { force: true }).catch?.(() => {});
+
         const root = document.getElementById('psd-inpage-overlay');
         if (!root) return;
 
         root.classList.add('cancelled');
         root.querySelector('#psd-inpage-title').textContent = 'Download cancelled';
+        // Ensure cancel button is hidden on terminal cancel state.
+        root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
         setTimeout(() => app.ui.showInPageOverlay(false), 800);
     }
 
@@ -515,7 +521,19 @@
         resetCaptureState();
         resetProgressUI();
 
-        document.getElementById('psd-inpage-overlay')?.classList.remove('minimized');
+        const root = document.getElementById('psd-inpage-overlay');
+        if (root) {
+            root.classList.remove('minimized', 'cancelled', 'completed', 'unsupported');
+            root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'flex');
+            root.querySelector('#psd-inpage-toggle')?.style.setProperty('display', 'block');
+            root.querySelector('#psd-inpage-spinner')?.style.setProperty('display', 'block');
+            root.querySelector('#psd-inpage-check')?.style.setProperty('display', 'none');
+            const toggle = root.querySelector('#psd-inpage-toggle');
+            if (toggle) {
+                toggle.disabled = false;
+                toggle.textContent = 'Cancel';
+            }
+        }
         app.ui.updateWindowControl();
         app.ui.showScrollDim(true);
         reportProgress('Preparing…', 'Reading page count…', 0);

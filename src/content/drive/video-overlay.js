@@ -6,6 +6,8 @@
         jobId: null,
         stage: 'download',
         merge: 0,
+        warmupPhase: null,
+        qualityLabel: '',
         video: { received: 0, total: 0 },
         audio: { received: 0, total: 0 }
     };
@@ -43,7 +45,7 @@
     width: 100%;
     box-sizing: border-box;
 }
-#psd-video-progress-spinner,         #psd-video-progress-check {
+#psd-video-progress-spinner,         #psd-video-progress-check,         #psd-video-progress-cancel-icon {
     grid-column: 1;
     grid-row: 1;
 }
@@ -55,14 +57,14 @@
     grid-column: 3;
     grid-row: 1;
 }
-#psd-video-progress-spinner,         #psd-video-progress-check {
+#psd-video-progress-spinner,         #psd-video-progress-check,         #psd-video-progress-cancel-icon {
     width: 36px;
     height: 36px;
     flex: 0 0 36px;
     display: grid;
     place-items: center;
 }
-#psd-video-progress-spinner svg,         #psd-video-progress-check svg {
+#psd-video-progress-spinner svg,         #psd-video-progress-check svg,         #psd-video-progress-cancel-icon svg {
     width: 36px;
     height: 36px;
     display: block;
@@ -99,6 +101,21 @@
     stroke-linecap: round;
     stroke-linejoin: round;
 }
+#psd-video-progress-cancel-icon {
+    display: none;
+}
+#psd-video-progress-cancel-icon circle {
+    fill: none;
+    stroke: #f28b82;
+    stroke-width: 3.5;
+}
+#psd-video-progress-cancel-icon path {
+    fill: none;
+    stroke: #f28b82;
+    stroke-width: 3.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
 #psd-video-progress-title-wrap {
     min-width: 0;
     width: 100%;
@@ -120,8 +137,11 @@
     font-size: 13px;
     line-height: 18px;
     color: #c4c7c5;
-    white-space: normal;
+    white-space: pre-line;
     overflow-wrap: anywhere;
+}
+#psd-video-progress-detail .psd-stream-line {
+    display: block;
 }
 #psd-video-progress-cancel,         #psd-video-progress-close {
     border: 0;
@@ -166,6 +186,10 @@
 #psd-video-progress-overlay.completed #psd-video-progress-check {
     display: grid;
 }
+#psd-video-progress-overlay.cancelled #psd-video-progress-cancel-icon,
+#psd-video-progress-overlay.error #psd-video-progress-cancel-icon {
+    display: grid;
+}
 #psd-video-progress-overlay.started #psd-video-progress-spinner {
     visibility: visible;
 }
@@ -191,8 +215,17 @@
 #psd-video-progress-overlay.completed #psd-video-progress-head {
     grid-template-columns: 36px minmax(0,1fr) 28px;
 }
-#psd-video-progress-overlay.cancelled #psd-video-progress-cancel,         #psd-video-progress-overlay.error #psd-video-progress-cancel {
+#psd-video-progress-overlay.cancelled #psd-video-progress-cancel,
+#psd-video-progress-overlay.error #psd-video-progress-cancel {
     display: none;
+}
+#psd-video-progress-overlay.cancelled #psd-video-progress-close,
+#psd-video-progress-overlay.error #psd-video-progress-close {
+    display: block;
+}
+#psd-video-progress-overlay.cancelled #psd-video-progress-head,
+#psd-video-progress-overlay.error #psd-video-progress-head {
+    grid-template-columns: 36px minmax(0,1fr) 28px;
 }
       </style>
       <div id="psd-video-progress-card">
@@ -208,6 +241,13 @@
               <svg viewBox="0 0 40 40">
                 <circle cx="20" cy="20" r="17"></circle>
                 <path d="M11.5 20.5 17 26l11.5-12"></path>
+              </svg>
+            </div>
+            <div id="psd-video-progress-cancel-icon" aria-hidden="true">
+              <svg viewBox="0 0 40 40">
+                <circle cx="20" cy="20" r="17"></circle>
+                <path d="M14 14 26 26"></path>
+                <path d="M26 14 14 26"></path>
               </svg>
             </div>
             <div id="psd-video-progress-title-wrap">
@@ -275,6 +315,42 @@
         const audioReceived = Math.max(0, Number(state.audio.received) || 0);
         return videoReceived + audioReceived;
     }
+    function streamLine(label, received, total) {
+        const r = Math.max(0, Number(received) || 0);
+        const t = Math.max(0, Number(total) || 0);
+        if (t > 0) return `${label}: ${formatBytes(r)} / ${formatBytes(t)}`;
+        if (r > 0) return `${label}: ${formatBytes(r)}`;
+        return `${label}: —`;
+    }
+    function formatSeparateProgress() {
+        const hasVideo = (state.video.total > 0) || (state.video.received > 0);
+        const hasAudio = (state.audio.total > 0) || (state.audio.received > 0);
+        // Progressive / single-stream downloads only report under "video".
+        if (hasVideo && !hasAudio) {
+            return streamLine('Video', state.video.received, state.video.total);
+        }
+        if (!hasVideo && hasAudio) {
+            return streamLine('Audio', state.audio.received, state.audio.total);
+        }
+        if (hasVideo && hasAudio) {
+            return (
+                streamLine('Video', state.video.received, state.video.total) +
+                '\n' +
+                streamLine('Audio', state.audio.received, state.audio.total)
+            );
+        }
+        return 'Download will start slow, please wait!';
+    }
+    function formatSeparateEstimates() {
+        const hasVideo = state.video.total > 0;
+        const hasAudio = state.audio.total > 0;
+        if (hasVideo && hasAudio) {
+            return `Video: ${formatBytes(state.video.total)}\nAudio: ${formatBytes(state.audio.total)}`;
+        }
+        if (hasVideo) return `Video: ${formatBytes(state.video.total)}`;
+        if (hasAudio) return `Audio: ${formatBytes(state.audio.total)}`;
+        return 'Download will start slow, please wait!';
+    }
     function downloadOverallPercent() {
         const combinedSize = combinedTotal();
         if (!combinedSize) return 0;
@@ -293,7 +369,7 @@
     }
     function stageRank(stage) {
         return({
-            download: 1, merge: 2, processing: 3, started: 4, ready: 5, cancel: 99, error: 99
+            download: 1, merge: 2, processing: 3, started: 4, ready: 5, cancel: 99, cancelled: 99, error: 99
         })[stage] || 0;
     }
     function setState(stage, detail = null, force = false) {
@@ -305,8 +381,10 @@
         const info = root.querySelector('#psd-video-progress-detail');
         const cancel = root.querySelector('#psd-video-progress-cancel');
         if (stage === 'download') {
-            title.textContent = 'Downloading Stream';
-            info.textContent = combinedTotal()  ? `Estimated Size: ${formatBytes(combinedTotal())}`: 'Download will start slow, please wait!';
+            title.textContent = state.qualityLabel
+                ? `Downloading ${state.qualityLabel}`
+                : 'Downloading Stream';
+            info.textContent = (state.video.total > 0 || state.audio.total > 0) ? formatSeparateEstimates() : 'Download will start slow, please wait!';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
         }else if (stage === 'merge') {
@@ -336,11 +414,12 @@
             cancel.style.display = 'none';
             root.classList.add('completed');
             setRing(100);
-        }else if (stage === 'cancel') {
+        }else if (stage === 'cancel' || stage === 'cancelled') {
             title.textContent = 'Download Cancelled';
             info.textContent = '';
             cancel.style.display = 'none';
             root.classList.add('cancelled');
+            stage = 'cancelled';
         }else if (stage === 'error') {
             title.textContent = 'Video download failed';
             info.textContent = detail || 'The video could not be downloaded.';
@@ -364,21 +443,36 @@
         const digits = value >= 100  ? 0: value >= 10  ? 1: 2;
         return `${value.toFixed(digits)} ${unit}`;
     }
-    function show(visible = true, jobId = null, videoTotal = 0, audioTotal = 0) {
+    function show(visible = true, jobId = null, videoTotal = 0, audioTotal = 0, qualityLabel = '') {
         const root = ensure();
         if (!root) return;
         if (!visible) {
             root.style.display = 'none';
             return;
         }
-        if (state.jobId && !['ready', 'cancelled', 'error'].includes(state.stage)) {
+        // Same active job → just keep the overlay visible (don't reset progress).
+        // Different job (e.g. slow-start restart) or finished stage → full reset.
+        const sameActiveJob =
+            jobId &&
+            state.jobId === jobId &&
+            !['ready', 'cancelled', 'error'].includes(state.stage);
+        if (sameActiveJob) {
             root.style.display = 'block';
+            if (qualityLabel) {
+                state.qualityLabel = qualityLabel;
+                const title = root.querySelector('#psd-video-progress-title');
+                if (title && state.stage === 'download') {
+                    title.textContent = `Downloading ${qualityLabel}`;
+                }
+            }
             return;
         }
         root.style.display = 'block';
         state.jobId = jobId || null;
         state.stage = 'download';
         state.merge = 0;
+        state.warmupPhase = null;
+        state.qualityLabel = qualityLabel || state.qualityLabel || '';
         state.video.total = Math.max(0, Number(videoTotal) || 0);
         state.audio.total = Math.max(0, Number(audioTotal) || 0);
         state.video = { received: 0, total: state.video.total };
@@ -401,20 +495,29 @@
             const title = root.querySelector('#psd-video-progress-title');
             const detail = root.querySelector('#psd-video-progress-detail');
             if (msg.warmup.phase === 'restarting') {
+                state.warmupPhase = 'restarting';
                 if (title) title.textContent = 'Restarting download';
                 if (detail) detail.textContent = 'Connection was too slow — trying again…';
             } else if (msg.warmup.phase === 'checking') {
-                if (title) title.textContent = 'Downloading Stream';
+                state.warmupPhase = 'checking';
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
                 if (detail) detail.textContent = 'Checking download speed…';
             } else if (msg.warmup.phase === 'done') {
-                if (title) title.textContent = 'Downloading Stream';
+                state.warmupPhase = null;
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
                 if (detail) {
-                    detail.textContent = combinedTotal()
-                        ? `Estimated Size: ${formatBytes(combinedTotal())}`
+                    detail.textContent = (state.video.total > 0 || state.audio.total > 0 ||
+                        state.video.received > 0 || state.audio.received > 0)
+                        ? formatSeparateProgress()
                         : 'Downloading…';
                 }
+                // Refresh ring with whatever progress we already have.
+                if (state.stage === 'download') {
+                    setRing(downloadOverallPercent() * DOWNLOAD_WEIGHT * 100);
+                }
             } else if (msg.warmup.remainingSec > 0) {
-                if (title) title.textContent = 'Downloading Stream';
+                state.warmupPhase = 'warmup';
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
                 if (detail) {
                     const sec = Math.max(1, Number(msg.warmup.remainingSec) || 1);
                     detail.textContent = `Warming up download: ${sec}s`;
@@ -432,6 +535,15 @@
             }
             const percent = downloadOverallPercent();
             if (state.stage === 'download') setRing(percent * DOWNLOAD_WEIGHT * 100);
+
+            // Once warmup/check is finished, keep the detail text in sync with progress.
+            // During warmup/checking the detail is reserved for status messages.
+            if (!state.warmupPhase) {
+                const detail = root.querySelector('#psd-video-progress-detail');
+                if (detail) {
+                    detail.textContent = formatSeparateProgress();
+                }
+            }
             return;
         }
         if (msg.stage === 'download') {
@@ -476,6 +588,7 @@
     window[NS] = {
         show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, clearJob: () => {
             state.jobId = null;
+            /* keep qualityLabel for display continuity */
         }
     };
 })();

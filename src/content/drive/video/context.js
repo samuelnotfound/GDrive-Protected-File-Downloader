@@ -65,6 +65,7 @@
 
             video.pickerFormats = cloneFormats(snapshot.formats);
             video.formats = cloneFormats(video.pickerFormats);
+            video.qualityMenuOptions = Array.isArray(snapshot.menuOptions) ? snapshot.menuOptions.slice() : [];
             video.scanCache = {
                 fileId: id,
                 at: Number(snapshot.savedAt) || Date.now(),

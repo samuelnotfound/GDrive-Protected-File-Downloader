@@ -14,35 +14,92 @@
     let qualityPickerRehydrating = false;
     let qualityPickerRestorePromise = null;
 
-    function getDisplayVideoFormats(formats = []) {
-        const map = new Map();
+    // Prefer the player's real Quality menu labels (scanned from the DOM),
+    // same idea as Drive Quality Trigger's scanQualities() → renderQualityList().
+    // Only surfaces heights the menu actually offered, never assumed itag heights.
+    function getDisplayVideoFormats(formats = [], menuOptions = null) {
+        const score = item =>
+            (/video\/mp4/i.test(String(item.mime || '')) ? 1_000_000_000 : 0) +
+            Number(item.contentLength || 0) +
+            Number(item.capturedAt || 0) / 1e9;
 
+        const byHeight = new Map();
         for (const format of Array.isArray(formats) ? formats : []) {
             if (!format?.url) continue;
-
-            const height = Number(format.height) || 0;
-            const fps = Number(format.fps) || 0;
-            const key = height
-                ? `${height}p|${fps >= 50 ? 'highfps' : 'normal'}`
-                : `${Number(format.width) || 0}x${height}`;
-
-            const score = item =>
-                (/video\/mp4/i.test(String(item.mime || '')) ? 1_000_000_000 : 0) +
-                Number(item.contentLength || 0) +
-                Number(item.capturedAt || 0) / 1e9;
-
-            const current = map.get(key);
-            if (!current || score(format) > score(current)) map.set(key, format);
+            // qualityHeight (menu probe) always wins over raw height (itag guess).
+            const height = Number(format.qualityHeight || format.height) || 0;
+            if (!height) continue;
+            const normalized = { ...format, height, qualityHeight: height };
+            const current = byHeight.get(height);
+            if (!current || score(normalized) > score(current)) byHeight.set(height, normalized);
         }
 
-        return [...map.values()].sort((a, b) =>
-            (Number(b.height || 0) - Number(a.height || 0)) ||
-            (Number(b.fps || 0) - Number(a.fps || 0)) ||
-            (Number(b.contentLength || 0) - Number(a.contentLength || 0))
-        );
+        // Also index by probeQuality label so a stream tagged "480p" during
+        // probing can be matched even if its itag height said something else.
+        const byProbeLabel = new Map();
+        for (const format of Array.isArray(formats) ? formats : []) {
+            if (!format?.url) continue;
+            const label = String(format.probeQuality || format.menuLabel || '').trim().toLowerCase();
+            if (!label) continue;
+            const height = Number(format.qualityHeight || format.height) || 0;
+            const normalized = { ...format, height: height || Number(label.match(/(\d{3,4})p/i)?.[1] || 0), qualityHeight: height };
+            const current = byProbeLabel.get(label);
+            if (!current || score(normalized) > score(current)) byProbeLabel.set(label, normalized);
+        }
+
+        const menu = Array.isArray(menuOptions) ? menuOptions : (video.qualityMenuOptions || []);
+        const menuHeights = menu
+            .map(option => ({
+                height: Number(option?.height || 0),
+                label: String(option?.text || option?.label || '').trim()
+            }))
+            .filter(option => option.height > 0);
+
+        // Live menu is the only source of truth when we have it — never invent
+        // 1080p/720p that the player did not list (same as Drive Quality Trigger).
+        if (menuHeights.length) {
+            const seen = new Set();
+            const ordered = [];
+            for (const option of menuHeights.sort((a, b) => b.height - a.height)) {
+                if (seen.has(option.height)) continue;
+                const labelKey = (option.label || `${option.height}p`).toLowerCase();
+                const stream =
+                    byHeight.get(option.height) ||
+                    byProbeLabel.get(labelKey) ||
+                    byProbeLabel.get(`${option.height}p`);
+                if (!stream?.url) continue;
+                seen.add(option.height);
+                ordered.push({
+                    ...stream,
+                    height: option.height,
+                    qualityHeight: option.height,
+                    menuLabel: option.label || `${option.height}p`
+                });
+            }
+            // If menu matching produced nothing (probe race / missing pairs)
+            // fall through to captured streams so the picker is not empty.
+            if (ordered.length) return ordered;
+        }
+
+        // Fallback: no menu snapshot — show captured streams, dropping pure itag guesses.
+        return [...byHeight.values()]
+            .filter(stream => {
+                const source = String(stream.heightSource || '').toLowerCase();
+                if (Number(stream.qualityHeight || 0) > 0) return true;
+                if (source === 'probe' || source === 'url') return true;
+                if (source === 'itag' || source === '') {
+                    return !!String(stream.probeQuality || '').trim();
+                }
+                return true;
+            })
+            .sort((a, b) =>
+                (Number(b.height || 0) - Number(a.height || 0)) ||
+                (Number(b.contentLength || 0) - Number(a.contentLength || 0))
+            );
     }
 
     const formatVideoLabel = format => {
+        if (format?.menuLabel) return format.menuLabel;
         const height = Number(format?.height) || 0;
         const width = Number(format?.width) || 0;
         return height ? `${height}p` : (width ? `${width}px` : 'Video');
@@ -123,18 +180,61 @@
         if (blocker) delete blocker.dataset.open;
     }
 
+
     function installInteractionShield() {
         if (window.__PSD_QUALITY_PICKER_INTERACTION_SHIELD) return;
         window.__PSD_QUALITY_PICKER_INTERACTION_SHIELD = true;
 
         const blockPickerEvent = event => {
-            const picker = event.target?.closest?.('#psd-video-quality-picker');
-            if (!picker) return;
+            const target = event.target;
+            const inUi = !!(
+                target?.closest?.('#psd-video-quality-picker') ||
+                target?.closest?.('#psd-video-quality-menu')
+            );
+            if (!inUi) return;
 
+            // Stop Drive menu handlers; we handle UI ourselves in capture phase.
+            event.stopPropagation();
             event.stopImmediatePropagation();
-            if (event.type === 'click' && event.target?.closest?.('#psd-video-quality-download')) {
-                event.preventDefault();
+            if (event.type !== 'click') return;
+            event.preventDefault();
+
+            const root = document.getElementById('psd-video-quality-picker');
+            if (!root) return;
+
+            if (target.closest('#psd-video-quality-download')) {
+                setQualityDropdownOpen(root, false);
                 void downloadFromPicker();
+                return;
+            }
+
+            if (target.closest('#psd-video-quality-trigger')) {
+                const trigger = root.querySelector('#psd-video-quality-trigger');
+                if (trigger?.getAttribute('aria-disabled') === 'true') return;
+                setQualityDropdownOpen(root, !root.classList.contains('open'));
+                return;
+            }
+
+            const option = target.closest('.psd-quality-option');
+            if (option && !option.disabled) {
+                const select = root.querySelector('#psd-video-quality-video');
+                const labelEl = root.querySelector('.psd-quality-trigger-label');
+                const download = root.querySelector('#psd-video-quality-download');
+                const value = option.dataset.value || '';
+                if (select) select.value = value;
+                if (labelEl) labelEl.textContent = option.textContent || value;
+                // Remember height so download can resolve even if format ids collide.
+                try {
+                    video.lastSelectedQuality = (option.textContent || '').trim();
+                    video.lastSelectedHeight = Number(option.dataset.height || 0) || 0;
+                } catch (_) {}
+                document.querySelectorAll('#psd-video-quality-menu .psd-quality-option').forEach(node => {
+                    node.setAttribute('aria-selected', node === option ? 'true' : 'false');
+                });
+                setQualityDropdownOpen(root, false);
+                // Do NOT call updatePickerState() here — rebuilding the list resets
+                // selection and can mark multiple rows selected when format ids collide.
+                if (download) download.disabled = !value;
             }
         };
 
@@ -143,79 +243,209 @@
         }
     }
 
-    function syncQualityPickerTypography(item) {
-        const root = document.getElementById('psd-video-quality-picker');
-        if (!root || !item) return;
-
-        const apply = (element, size, weight, line) => {
-            if (!element) return;
-            element.style.setProperty('font-family', 'Roboto, Arial, sans-serif', 'important');
-            element.style.setProperty('font-size', size, 'important');
-            element.style.setProperty('font-weight', weight, 'important');
-            element.style.setProperty('line-height', line, 'important');
-            element.style.setProperty('letter-spacing', 'normal', 'important');
-        };
-
-        apply(root.querySelector('label'), '14px', '400', '20px');
-        apply(root.querySelector('#psd-video-quality-video'), '14px', '400', '20px');
-        apply(root.querySelector('#psd-video-quality-download'), '14px', '500', '20px');
-        root.querySelectorAll('#psd-video-quality-video option').forEach(option =>
-            apply(option, '14px', '400', '20px')
-        );
-
-        const status = root.querySelector('#psd-video-quality-status');
-        if (status) {
-            status.style.setProperty('font-family', 'Roboto, Arial, sans-serif', 'important');
-            status.style.setProperty('font-size', '11px', 'important');
-            status.style.setProperty('line-height', '14px', 'important');
-            status.style.setProperty('font-weight', '400', 'important');
-        }
+    function syncQualityPickerTypography() {
+        /* typography is owned by the template CSS */
     }
 
     const QUALITY_PICKER_TEMPLATE = `
             <style>
-                #psd-video-quality-picker{display:none;box-sizing:border-box;width:100%;margin:10px 0 2px;padding:0;font:14px/20px Roboto,Arial,sans-serif;color:inherit;background:transparent;border:0;border-radius:0;box-shadow:none;position:relative;z-index:3;pointer-events:auto;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;}
-                #psd-video-quality-picker .psd-quality-row{display:flex;align-items:stretch;gap:8px;width:100%;}
-                #psd-video-quality-picker .psd-quality-field{flex:1 1 0;min-width:0;margin:0;padding:0;}
-                #psd-video-quality-picker .psd-quality-select-wrap{position:relative;pointer-events:auto;height:36px;}
-                #psd-video-quality-picker select{display:block;position:relative;z-index:4;width:100% !important;height:36px !important;min-height:36px !important;max-height:36px !important;box-sizing:border-box;appearance:none;-webkit-appearance:none;color-scheme:dark;background-color:#303134;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path fill='%23a8c7fa' d='M7 10l5 5 5-5z'/></svg>");background-repeat:no-repeat;background-position:right 6px center;background-size:24px 24px;color:inherit;border:1px solid #6f7376;border-radius:8px;padding:0 32px 0 12px !important;font-family:Roboto,Arial,sans-serif !important;font-size:14px !important;font-weight:400 !important;line-height:20px !important;letter-spacing:normal !important;outline:none;cursor:pointer;box-shadow:none;transition:background-color .12s ease,border-color .12s ease;}
-                #psd-video-quality-picker select option{font-family:Roboto,Arial,sans-serif !important;font-size:14px !important;font-weight:400 !important;line-height:20px !important;background:#303134;color:#fff;}
-                #psd-video-quality-picker select:hover{background-color:#35363a;border-color:#9aa0a6;}
-                #psd-video-quality-picker select:focus{border-color:#a8c7fa;box-shadow:0 0 0 1px #a8c7fa;}
-                #psd-video-quality-picker select:disabled{opacity:.7;cursor:default;}
-                #psd-video-quality-status{margin:6px 0 0;padding:0 2px;font:inherit;font-size:11px !important;line-height:14px !important;font-weight:400 !important;color:rgba(255,255,255,.62);white-space:normal;}
+                #psd-video-quality-picker{
+                    display:none;box-sizing:border-box;width:100%;
+                    margin:10px 0 4px;padding:0;
+                    font:500 14px/20px 'Google Sans',Roboto,Arial,sans-serif;
+                    color:#e8eaed;background:transparent;border:0;
+                    position:relative;z-index:5;pointer-events:auto;
+                    -webkit-font-smoothing:antialiased;
+                }
+                #psd-video-quality-picker .psd-quality-row{
+                    display:flex;align-items:center;gap:6px;width:100%;
+                    min-width:0;
+                }
+                #psd-video-quality-picker .psd-quality-field{
+                    flex:0 1 96px;width:96px;min-width:84px;max-width:110px;
+                    margin:0;padding:0;position:relative;
+                }
+                #psd-video-quality-trigger{
+                    display:flex;align-items:center;justify-content:space-between;gap:4px;
+                    width:100%;height:32px;box-sizing:border-box;
+                    padding:0 8px 0 10px;
+                    border:1px solid rgba(255,255,255,.12);
+                    border-radius:999px;
+                    background:#3c4043;color:#e8eaed;
+                    cursor:pointer;outline:none;
+                    font:500 13px/18px 'Google Sans',Roboto,Arial,sans-serif;
+                }
+                #psd-video-quality-trigger:hover{background:#44474a;border-color:rgba(255,255,255,.18);}
+                #psd-video-quality-trigger[aria-disabled="true"]{opacity:.55;cursor:default;}
+                #psd-video-quality-picker.open #psd-video-quality-trigger{
+                    border-radius:10px 10px 0 0;
+                    border-bottom-color:transparent;
+                    background:#3c4043;
+                }
+                #psd-video-quality-trigger .psd-quality-trigger-label{
+                    flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:clip;
+                }
+                #psd-video-quality-trigger .psd-quality-chevron{
+                    flex:0 0 auto;width:16px;height:16px;display:grid;place-items:center;color:#c4c7c5;
+                }
+                #psd-video-quality-picker.open #psd-video-quality-trigger .psd-quality-chevron{
+                    transform:rotate(180deg);
+                }
+                #psd-video-quality-menu{
+                    display:none;
+                    position:fixed;
+                    z-index:2147483647;
+                    box-sizing:border-box;
+                    padding:3px;
+                    background:#3c4043;
+                    border:1px solid rgba(255,255,255,.12);
+                    border-top-color:rgba(255,255,255,.08);
+                    border-radius:0 0 10px 10px;
+                    max-height:160px;
+                    overflow-x:hidden;overflow-y:auto;
+                    pointer-events:auto;
+                    scrollbar-width:thin;
+                    scrollbar-color:rgba(255,255,255,.2) transparent;
+                }
+                #psd-video-quality-menu[data-open="true"]{display:block;}
+                #psd-video-quality-menu::-webkit-scrollbar{width:6px;}
+                #psd-video-quality-menu::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:6px;}
+                .psd-quality-option{
+                    display:flex;align-items:center;justify-content:space-between;gap:8px;
+                    width:100%;box-sizing:border-box;
+                    margin:0;padding:7px 8px;
+                    border:0;border-radius:6px;
+                    background:transparent;color:#e8eaed;
+                    font:400 13px/18px 'Google Sans',Roboto,Arial,sans-serif;
+                    text-align:left;cursor:pointer;outline:none;
+                }
+                .psd-quality-option:hover{background:rgba(255,255,255,.06);}
+                .psd-quality-option[aria-selected="true"]{font-weight:700;background:transparent;}
+                .psd-quality-option[aria-selected="true"]::after{
+                    content:"";flex:0 0 auto;width:14px;height:14px;
+                    background:center / 14px 14px no-repeat
+                      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8eaed' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M5 13l4 4L19 7'/></svg>");
+                }
+                .psd-quality-option[disabled]{opacity:.5;cursor:default;}
+                #psd-video-quality-actions{flex:0 0 auto;}
+                #psd-video-quality-download{
+                    display:inline-flex;align-items:center;justify-content:center;gap:6px;
+                    height:32px;box-sizing:border-box;
+                    padding:0 12px;
+                    border:1px solid rgba(255,255,255,.12);
+                    border-radius:999px;
+                    background:#3c4043;color:#e8eaed;
+                    font:500 13px/18px 'Google Sans',Roboto,Arial,sans-serif;
+                    cursor:pointer;outline:none;white-space:nowrap;
+                    flex:0 0 auto;flex-shrink:0;
+                }
+                #psd-video-quality-download:hover{background:#44474a;border-color:rgba(255,255,255,.18);}
+                #psd-video-quality-download:disabled{opacity:.5;cursor:default;}
+                #psd-video-quality-download::before{
+                    content:"";width:16px;height:16px;flex:0 0 auto;
+                    background:center / 16px 16px no-repeat
+                      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8eaed' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3v12'/><path d='M8 11l4 4 4-4'/><path d='M4 21h16'/></svg>");
+                }
+                #psd-video-quality-status{
+                    margin:6px 0 0;padding:0 2px;
+                    font:400 11px/14px Roboto,Arial,sans-serif;
+                    color:rgba(255,255,255,.62);
+                }
                 #psd-video-quality-status:empty{display:none;}
-                #psd-video-quality-actions{display:flex;flex:0 0 auto;align-items:stretch;position:relative;z-index:4;pointer-events:auto;}
-                #psd-video-quality-actions button{display:inline-flex;align-items:center;justify-content:center;position:relative;z-index:5;border:0;outline:none;box-sizing:border-box;width:96px !important;min-height:36px !important;height:36px !important;border-radius:8px;padding:0 12px;background:#a8c7fa;color:#062e6f;font-family:Roboto,Arial,sans-serif !important;font-size:14px !important;font-weight:500 !important;line-height:20px !important;letter-spacing:.1px !important;cursor:pointer;white-space:nowrap;transition:background-color .12s ease,box-shadow .12s ease,transform .06s ease;}
-                #psd-video-quality-actions button:hover{background:#c2d7fb;box-shadow:0 1px 3px rgba(0,0,0,.35);}
-                #psd-video-quality-actions button:active{transform:translateY(1px);}
-                #psd-video-quality-actions button:focus-visible{outline:2px solid #a8c7fa;outline-offset:2px;}
-                #psd-video-quality-download:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;}
             </style>
             <div class="psd-quality-row">
                 <div class="psd-quality-field">
-                    <div class="psd-quality-select-wrap"><select id="psd-video-quality-video" aria-label="Video quality"></select></div>
+                    <button type="button" id="psd-video-quality-trigger" aria-haspopup="listbox" aria-expanded="false">
+                        <span class="psd-quality-trigger-label">Quality</span>
+                        <span class="psd-quality-chevron" aria-hidden="true">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </span>
+                    </button>
+                    <input type="hidden" id="psd-video-quality-video" value="" />
                 </div>
                 <div id="psd-video-quality-actions">
                     <button id="psd-video-quality-download" type="button">Download</button>
                 </div>
             </div>
-            <div id="psd-video-quality-status"></div>`;
+            <div id="psd-video-quality-status"></div>
+            <div id="psd-video-quality-menu" role="listbox" aria-label="Video quality"></div>`;
+
+    function positionQualityMenu(root) {
+        const trigger = root?.querySelector('#psd-video-quality-trigger');
+        const menu = document.getElementById('psd-video-quality-menu');
+        if (!trigger || !menu) return;
+
+        const rect = trigger.getBoundingClientRect();
+        menu.style.left = `${Math.round(rect.left)}px`;
+        menu.style.width = `${Math.round(rect.width)}px`;
+        menu.style.top = `${Math.round(rect.bottom - 1)}px`;
+    }
+
+    function setQualityDropdownOpen(root, open) {
+        const picker = root || document.getElementById('psd-video-quality-picker');
+        const menu = document.getElementById('psd-video-quality-menu');
+        const trigger = picker?.querySelector('#psd-video-quality-trigger');
+
+        if (picker) {
+            picker.classList.toggle('open', !!open);
+            if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        if (!menu) return;
+
+        if (open && picker) {
+            if (menu.parentElement !== document.body) document.body.appendChild(menu);
+            menu.dataset.open = 'true';
+            menu.style.display = 'block';
+            positionQualityMenu(picker);
+            requestAnimationFrame(() => positionQualityMenu(picker));
+        } else {
+            delete menu.dataset.open;
+            menu.style.left = '';
+            menu.style.top = '';
+            menu.style.width = '';
+            menu.style.display = 'none';
+        }
+    }
+
+    function closeQualityDropdown() {
+        setQualityDropdownOpen(document.getElementById('psd-video-quality-picker'), false);
+    }
 
     function bindQualityPickerEvents(root) {
-        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-            root.addEventListener(type, event => event.stopPropagation(), true);
-        }
-        root.addEventListener('keydown', event => {
-            if (event.target?.matches?.('select')) event.stopPropagation();
-        }, true);
-
-        root.querySelector('#psd-video-quality-download').onclick = event => {
-            event.preventDefault();
-            event.stopPropagation();
-            downloadFromPicker();
+        // Close list on any outside interaction.
+        const maybeClose = event => {
+            const menu = document.getElementById('psd-video-quality-menu');
+            if (!menu || menu.dataset.open !== 'true') return;
+            const t = event.target;
+            if (t?.closest?.('#psd-video-quality-trigger')) return;
+            if (t?.closest?.('#psd-video-quality-menu')) return;
+            closeQualityDropdown();
         };
-        root.querySelector('#psd-video-quality-video').onchange = updatePickerState;
+
+        document.addEventListener('pointerdown', maybeClose, true);
+        document.addEventListener('mousedown', maybeClose, true);
+        document.addEventListener('click', maybeClose, true);
+
+        // If the Drive file menu closes or picker is hidden, drop the floating list.
+        const observer = new MutationObserver(() => {
+            const menu = document.getElementById('psd-video-quality-menu');
+            if (!menu || menu.dataset.open !== 'true') return;
+            const picker = document.getElementById('psd-video-quality-picker');
+            const hidden = !picker || picker.style.display === 'none' || !picker.offsetParent;
+            const driveMenuGone = !getVisibleDriveMenu();
+            if (hidden || driveMenuGone) closeQualityDropdown();
+        });
+        try {
+            observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+        } catch (_) {}
+
+        window.addEventListener('blur', closeQualityDropdown);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) closeQualityDropdown();
+        });
+        window.addEventListener('resize', closeQualityDropdown);
+        window.addEventListener('scroll', closeQualityDropdown, true);
     }
 
     function ensureQualityPicker() {
@@ -362,7 +592,9 @@
             if (!video.pickerFormats || qualityPickerRehydrating || !isMountedInVisibleDriveMenu(liveRoot)) return;
 
             const select = liveRoot.querySelector('#psd-video-quality-video');
-            if (!select || select.options.length) return;
+            const menu = document.getElementById('psd-video-quality-menu');
+            const hasOptions = menu && menu.querySelector('.psd-quality-option:not([disabled])');
+            if (!select || hasOptions) return;
 
             qualityPickerRehydrating = true;
             try { updatePickerState(); }
@@ -389,10 +621,12 @@
         }
         video.pickerFormats = null;
         video.scanCache = null;
+        video.qualityMenuOptions = [];
     }
 
     function close(clearSnapshot = false) {
         stopWatch();
+        closeQualityDropdown();
 
         const root = document.getElementById('psd-video-quality-picker');
         if (root) root.style.display = 'none';
@@ -406,37 +640,74 @@
     }
 
     function populateSelect(select, formats, labeler, emptyText) {
-        const previousValue = select.value;
-        const previousText = select.selectedOptions?.[0]?.textContent || '';
+        const root = document.getElementById('psd-video-quality-picker');
+        const menu = document.getElementById('psd-video-quality-menu');
+        const trigger = root?.querySelector('#psd-video-quality-trigger');
+        const labelEl = trigger?.querySelector('.psd-quality-trigger-label');
+        if (!root || !menu || !trigger || !labelEl || !select) return;
 
-        select.replaceChildren();
+        const previousValue = select.value;
+        const previousText = labelEl.textContent || '';
+        menu.replaceChildren();
+        setQualityDropdownOpen(root, false);
 
         if (!Array.isArray(formats) || !formats.length) {
-            const option = document.createElement('option');
-            option.value = '';
-            option.textContent = emptyText;
-            option.disabled = true;
-            option.selected = true;
-            select.appendChild(option);
-            select.disabled = true;
+            select.value = '';
+            labelEl.textContent = emptyText;
+            trigger.setAttribute('aria-disabled', 'true');
+            const empty = document.createElement('button');
+            empty.type = 'button';
+            empty.className = 'psd-quality-option';
+            empty.disabled = true;
+            empty.textContent = emptyText;
+            menu.appendChild(empty);
             return;
         }
 
-        select.disabled = false;
+        trigger.removeAttribute('aria-disabled');
+        let selectedValue = '';
+        let selectedLabel = '';
+
         formats.forEach((format, index) => {
-            const option = document.createElement('option');
-            option.value = format.id || String(index);
-            option.textContent = labeler(format);
-            select.appendChild(option);
+            const height = Number(format.qualityHeight || format.height || 0) || 0;
+            // Unique per menu row so 240p and 360p never share a value even if
+            // the underlying stream id/itag collided during capture.
+            const value = `h${height}:${format.id || index}`;
+            const label = labeler(format);
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.className = 'psd-quality-option';
+            option.setAttribute('role', 'option');
+            option.dataset.value = value;
+            option.dataset.height = String(height || '');
+            option.dataset.formatId = format.id || '';
+            option.textContent = label;
+            menu.appendChild(option);
+
+            if (!selectedValue && previousValue && value === previousValue) {
+                selectedValue = value;
+                selectedLabel = label;
+            } else if (!selectedValue && previousText && label === previousText) {
+                selectedValue = value;
+                selectedLabel = label;
+            } else if (!selectedValue && video.lastSelectedHeight && height === Number(video.lastSelectedHeight)) {
+                selectedValue = value;
+                selectedLabel = label;
+            }
         });
 
-        const options = [...select.options];
-        const byValue = options.findIndex(option => previousValue && option.value === previousValue);
-        const byText = byValue >= 0
-            ? byValue
-            : options.findIndex(option => previousText && option.textContent === previousText);
+        if (!selectedValue) {
+            const first = formats[0];
+            const height = Number(first.qualityHeight || first.height || 0) || 0;
+            selectedValue = `h${height}:${first.id || '0'}`;
+            selectedLabel = labeler(first);
+        }
 
-        select.selectedIndex = byText >= 0 ? byText : 0;
+        select.value = selectedValue;
+        labelEl.textContent = selectedLabel;
+        menu.querySelectorAll('.psd-quality-option').forEach(node => {
+            node.setAttribute('aria-selected', node.dataset.value === selectedValue ? 'true' : 'false');
+        });
     }
 
     function updatePickerState() {
@@ -461,7 +732,7 @@
             ? 'No video format detected'
             : 'No adaptive video format detected';
 
-        populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect), formatVideoLabel, emptyText);
+        populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect, video.qualityMenuOptions), formatVideoLabel, emptyText);
 
         const valid = !!(videoSelect.value && (hasProgressive || (hasAdaptiveVideo && hasAudio)));
         download.disabled = !valid;
@@ -473,6 +744,7 @@
 
     function resetScanUI() {
         stopWatch();
+        closeQualityDropdown();
 
         const root = document.getElementById('psd-video-quality-picker');
         if (root) root.style.display = 'none';
@@ -492,9 +764,20 @@
             : fallback;
     }
 
-    function prepareQualityPicker(formats, message) {
+    function prepareQualityPicker(formats, message, menuOptions = null) {
         video.formats = formats || { video: [], audio: [], progressive: [] };
         video.pickerFormats = core.cloneFormats(video.formats);
+        if (Array.isArray(menuOptions) && menuOptions.length) {
+            video.qualityMenuOptions = menuOptions
+                .map(option => ({
+                    height: Number(option?.height || 0),
+                    label: String(option?.text || option?.label || '').trim(),
+                    text: String(option?.text || option?.label || '').trim()
+                }))
+                .filter(option => option.height > 0);
+        } else if (!Array.isArray(video.qualityMenuOptions)) {
+            video.qualityMenuOptions = [];
+        }
         video.scanCache = {
             fileId: video.fileId,
             at: Date.now(),
@@ -502,7 +785,8 @@
                 ...video.pickerFormats.video,
                 ...video.pickerFormats.progressive
             ].map(format => Number(format.height) || 0).filter(Boolean)).size,
-            note: message || ''
+            note: message || '',
+            menuOptions: video.qualityMenuOptions.slice()
         };
     }
 
@@ -517,7 +801,7 @@
             updatePickerState();
 
             const liveRoot = document.getElementById('psd-video-quality-picker');
-            return (liveRoot?.querySelector('#psd-video-quality-video')?.options?.length || 0) > 0;
+            return !!(liveRoot?.querySelector('#psd-video-quality-video')?.value);
         }, 700, 25);
 
         if (!ready) throw new Error('Quality picker could not be mounted into the reopened File menu.');
@@ -526,8 +810,8 @@
         startWatch();
     }
 
-    async function showQualityPicker(formats, message = '') {
-        prepareQualityPicker(formats, message);
+    async function showQualityPicker(formats, message = '', menuOptions = null) {
+        prepareQualityPicker(formats, message, menuOptions);
         await core.saveQualitySnapshot();
 
         const root = ensureQualityPicker();
@@ -552,28 +836,68 @@
     }
 
     function getPickerDownloadRequest(root) {
-        const videoId = root.querySelector('#psd-video-quality-video').value;
+        const rawValue = root.querySelector('#psd-video-quality-video')?.value || '';
+        const label = root.querySelector('.psd-quality-trigger-label')?.textContent?.trim() || '';
         const pickerFormats = video.pickerFormats && video.operation === 'picker'
             ? video.pickerFormats
             : video.formats;
-        return pickerFormats?.video?.length
-            ? { videoFormatId: videoId }
-            : { progressiveFormatId: videoId };
+
+        // Values are "h{height}:{formatId}". Parse height so we pick the right stream
+        // even when multiple rows briefly shared an underlying id.
+        const heightMatch = String(rawValue).match(/^h(\d+):(.*)$/);
+        const selectedHeight = heightMatch
+            ? Number(heightMatch[1])
+            : (Number(video.lastSelectedHeight || 0) || Number(label.match(/(\d{3,4})/)?.[1] || 0));
+        const formatId = heightMatch ? heightMatch[2] : rawValue;
+
+        const list = pickerFormats?.video?.length
+            ? pickerFormats.video
+            : (pickerFormats?.progressive || []);
+        const byHeight = list.find(item =>
+            Number(item?.qualityHeight || item?.height || 0) === selectedHeight && item?.url
+        );
+        const byId = list.find(item => item?.id === formatId && item?.url);
+        const chosen = byHeight || byId || list[0] || null;
+        const resolvedId = chosen?.id || formatId;
+        const qualityHeight = Number(chosen?.qualityHeight || chosen?.height || selectedHeight || 0);
+
+        // Append " (480p)" so the saved file shows which quality was downloaded.
+        let filename = core.getCurrentDriveFileName?.() || video.lastFilenameSent || 'gdrive-video';
+        if (qualityHeight > 0) {
+            const base = String(filename).replace(/\.(mp4|m4v|webm|mov|avi|mkv|flv|3gp)$/i, '');
+            const cleaned = base.replace(/\s*\(\d{3,4}p\)\s*$/i, '').trim() || 'gdrive-video';
+            filename = `${cleaned} (${qualityHeight}p).mp4`;
+        }
+
+        const request = pickerFormats?.video?.length
+            ? { videoFormatId: resolvedId, qualityHeight, filename }
+            : { progressiveFormatId: resolvedId, qualityHeight, filename };
+        return request;
     }
 
     function beginVideoDownload(root, response) {
+        const qualityLabel =
+            root.querySelector('.psd-quality-trigger-label')?.textContent?.trim() ||
+            video.lastSelectedQuality ||
+            '';
+        video.lastSelectedQuality = qualityLabel;
+
         root.style.display = 'none';
-        video.restorePickerOnFileMenuOpen = false;
+        // Keep scanned qualities in memory/storage until page refresh or file change.
+        video.restorePickerOnFileMenuOpen = true;
         video.operation = 'staging';
-        clearSnapshot();
         try { app.ui.closeDriveFileMenu(); } catch (_) {}
         hidePageBlocker();
+
+        // Persist snapshot so cancel/reopen can restore the picker without re-probing.
+        void core.saveQualitySnapshot?.();
 
         videoOverlay.show(
             true,
             response.jobId || null,
             response.videoBytes || response.mediaBytes || 0,
-            response.audioBytes || 0
+            response.audioBytes || 0,
+            qualityLabel
         );
         app.video?.updateMenuState();
     }

@@ -6,11 +6,17 @@ const FORMAT_PROBE_TIMEOUT_MS = 6500;
 const STREAM_CAPTURE_TABS = new Map();
 const QUALITY_SCAN_RUNNING = new Map();
 
+// Timings from the original extension zip, plus settle keys used by the
+// Settings → Quality click sequence.
 const FAST_SCAN = Object.freeze({
     menuPollMs: 120,
     settingsTimeoutMs: 5000,
     qualityTimeoutMs: 4000,
     menuTimeoutMs: 3000,
+    settingsClickSettleMs: 200,
+    qualityClickSettleMs: 200,
+    optionClickSettleMs: 450,
+    optionSettleMs: 120,
     streamWaitMs: 650,
     finalStreamWaitMs: 250,
     streamPollMs: 35,

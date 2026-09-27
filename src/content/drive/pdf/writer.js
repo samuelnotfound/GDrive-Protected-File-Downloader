@@ -283,7 +283,19 @@
         let converted = 0;
         let error = null;
 
-        reportProgress('Processing', `Processing page 1 / ${pages.length}`, 50);
+        {
+            const root = document.getElementById('psd-inpage-overlay');
+            if (root) {
+                root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'flex');
+                const toggle = root.querySelector('#psd-inpage-toggle');
+                if (toggle) {
+                    toggle.style.display = 'block';
+                    toggle.disabled = false;
+                    toggle.textContent = 'Cancel';
+                }
+            }
+            reportProgress('Processing', `Processing page 1 / ${pages.length}`, 50);
+        }
         for (let index = 0; index < pages.length; index++) {
             if (pdf.stopRequested) break;
 

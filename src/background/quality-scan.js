@@ -1,4 +1,4 @@
-const SCAN_MAX_ATTEMPTS_PER_QUALITY = 2;
+const SCAN_MAX_ATTEMPTS_PER_QUALITY = 1;
 
 function createScanCapture(preexistingSession, recentStreams, fileId) {
     const capture = {
@@ -27,26 +27,25 @@ function recordQualityPair(capture, { height, video, audio, extra }) {
 
 
 async function ensurePlayback(tabId, frames) {
+    // Fast path: already playing — do not wait.
     if (await detectExistingPlayback(tabId)) {
-        return { success: true, playing: true, playbackDetected: true, method: 'already-playing-current-drive-video' };
+        return { success: true, playing: true, playbackDetected: true, method: 'already-playing' };
     }
 
-    // 1) The content script already loaded in each frame (drive-autoplay.js).
     const autoplay = await startAutoplayInFrames(tabId, frames);
     if (autoplay?.playbackDetected) return autoplay;
 
-    // 2) The same trigger logic injected directly, for frames the player created late.
     const injected = await playWithDom(tabId, frames);
     if (injected?.playbackDetected) return injected;
 
-    // 3) Last check: the player may have started between the two sweeps.
+    // Original post-play confirmation window.
     const verified = await verifyPlaybackStarted(tabId, 1500);
     return {
         ...injected,
         ...verified,
-        success: verified.playing,
-        playbackDetected: verified.playing,
-        method: verified.playing ? 'play state confirmation' : (injected?.method || 'dom-trigger autoplay exhausted')
+        success: !!verified.playing,
+        playbackDetected: !!verified.playing,
+        method: verified.playing ? 'play state confirmation' : (injected?.method || 'autoplay exhausted')
     };
 }
 
@@ -73,40 +72,50 @@ async function captureCurrentQualityStream(tabId, height, capture) {
     recordQualityPair(capture, { height, video, audio, extra: { existing: true } });
 }
 
-async function waitForQualityStream(tabId, probeToken, height, waitMs) {
+async function waitForQualityStream(tabId, probeToken, height, waitMs, usedUrls = new Set()) {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
         const candidates = await getQualityProbeCandidates(tabId, probeToken);
-        if ((candidates.video || []).some(stream => Number(stream?.height || 0) === height)) return;
+        const found = (candidates.video || []).some(stream => {
+            if (!stream?.url || isAudioStream(stream)) return false;
+            const key = streamUrlKey(stream);
+            if (key && usedUrls.has(key)) return false;
+            return true; // any new unique video URL counts
+        });
+        if (found) return true;
         await sleep(FAST_SCAN.streamPollMs);
     }
+    return false;
 }
 
-async function activateQualityAndCollect({ tabId, fileId, height, label, options, isFinalQuality, report }) {
+async function nudgePlaybackAfterQualitySwitch(tabId) {
+    try { await runQualityDom(tabId, 'nudgePlayback', { seconds: 0.35 }); } catch (_) {}
+    await resumePlaybackAfterQualitySwitch(tabId);
+}
+
+async function activateQualityAndCollect({ tabId, fileId, height, label, options, isFinalQuality, report, usedUrls = new Set() }) {
     const probe = await beginQualityProbe(tabId, fileId, label);
     const switchedAt = Date.now();
     let click = null;
     let result = { video: [], audio: [] };
+    let sawNewStream = false;
     try {
-        click = await activateQualityRow(
-            tabId,
-            height,
-            options,
-            isFinalQuality ? { waitMenuMs: FAST_SCAN.finalMenuCloseWaitMs, immediateSuccess: true } : {}
-        );
+        click = await activateQualityRow(tabId, height, options, {});
         report.method = click?.method || report.method;
         report.activated = !!click?.ok;
-        report.steps = (click?.attempts || []).map(attempt => ({
-            method: attempt.method, ok: !!attempt.ok, menuClosed: attempt.menuClosed, hitOk: attempt.hitOk, reason: attempt.reason || ''
+        report.steps = (click?.attempts || []).map(a => ({
+            method: a.method, ok: !!a.ok, reason: a.reason || '', step: a.step || ''
         }));
         if (click?.ok) {
-            await resumePlaybackAfterQualitySwitch(tabId);
-            await waitForQualityStream(tabId, probe.token, height, isFinalQuality ? FAST_SCAN.finalStreamWaitMs : FAST_SCAN.streamWaitMs);
+            await nudgePlaybackAfterQualitySwitch(tabId);
+            const waitMs = isFinalQuality ? FAST_SCAN.finalStreamWaitMs : FAST_SCAN.streamWaitMs;
+            sawNewStream = await waitForQualityStream(tabId, probe.token, height, waitMs, usedUrls);
+            report.sawNewStream = !!sawNewStream;
         }
     } finally {
         result = await finishProbe(tabId, probe, switchedAt, isFinalQuality);
     }
-    return { click, result };
+    return { click, result, probeStartedAt: probe.startedAt || switchedAt, sawNewStream };
 }
 
 async function finishProbe(tabId, probe, switchedAt, isFinalQuality) {
@@ -116,52 +125,120 @@ async function finishProbe(tabId, probe, switchedAt, isFinalQuality) {
     return endQualityProbe(tabId, probe.token);
 }
 
-async function pickStreamForQuality({ tabId, height, label, streams, activated }) {
-    const strict = streams.filter(stream => Number(stream.height || 0) === height && (stream.heightSource !== 'probe' || activated));
-    const strictMatch = chooseProbeCandidate(strict, height);
-    if (strictMatch) return { chosen: strictMatch, how: 'stream requested after the click', playingHeight: 0 };
-    if (!activated) return { chosen: null, how: '', playingHeight: 0 };
+function streamUrlKey(stream) {
+    try { return cleanURL(stream?.url || stream?.originalUrl || ''); } catch (_) { return String(stream?.url || ''); }
+}
 
-    const playingHeight = await getPlayingVideoHeight(tabId);
-    if (playingHeight === height && streams.length) {
-        const newest = streams.slice().sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0))[0];
-        return { chosen: newest, how: 'newest request; player confirmed at this height', playingHeight };
+/**
+ * After a successful menu click, the click is the authority for which quality
+ * the stream belongs to. Prefer:
+ *   1) unique URL with matching itag/url height
+ *   2) newest unique URL captured during this probe (even if itag height differs)
+ * Never reuse a URL already stored for another quality.
+ */
+async function pickStreamForQuality({ tabId, height, label, streams, activated, usedUrls = new Set(), probeStartedAt = 0 }) {
+    const h = Number(height || 0);
+    const available = (Array.isArray(streams) ? streams : []).filter(stream => {
+        if (!stream?.url || isAudioStream(stream)) return false;
+        const key = streamUrlKey(stream);
+        if (key && usedUrls.has(key)) return false;
+        return true;
+    });
+
+    // Prefer real itag/url height match among unique URLs.
+    const heightMatch = available
+        .filter(s => Number(s.height || 0) === h && String(s.heightSource || '') !== 'probe')
+        .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+    if (heightMatch[0]) {
+        return {
+            chosen: { ...heightMatch[0], height: h, qualityHeight: h, probeQuality: label },
+            how: 'unique stream with matching itag/url height',
+            playingHeight: 0
+        };
     }
 
-    const alreadyRequested = (streamCaptureState(tabId)?.recentStreams || [])
-        .filter(stream => stream?.url && /video/i.test(String(stream.mime || '')) && !isAudioStream(stream) &&
-            Number(stream.height || 0) === height && stream.heightSource !== 'probe');
-    const chosen = chooseProbeCandidate(alreadyRequested, height);
-    return { chosen, how: chosen ? 'stream Drive had already requested for this height' : '', playingHeight };
+    // Next: any unique stream captured after this probe started (click is authority).
+    const afterProbe = available
+        .filter(s => Number(s.capturedAt || 0) >= (probeStartedAt || 0) - 100)
+        .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+    if (afterProbe[0]) {
+        return {
+            chosen: { ...afterProbe[0], height: h, qualityHeight: h, probeQuality: label },
+            how: 'newest unique stream after quality click',
+            playingHeight: 0
+        };
+    }
+
+    // Any unique stream in the probe buffer after a successful click.
+    if (available[0] && activated) {
+        const newest = available.slice().sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0))[0];
+        return {
+            chosen: { ...newest, height: h, qualityHeight: h, probeQuality: label },
+            how: 'unique stream from probe buffer',
+            playingHeight: 0
+        };
+    }
+
+    // Re-clicked the already-selected quality: Drive may not fire a new request.
+    // Use a session stream whose real itag/url height matches (still unique).
+    if (activated) {
+        const recent = (streamCaptureState(tabId)?.recentStreams || [])
+            .filter(s => s?.url && !isAudioStream(s) && /video/i.test(String(s.mime || '')))
+            .filter(s => {
+                const key = streamUrlKey(s);
+                if (key && usedUrls.has(key)) return false;
+                return Number(s.height || 0) === h && String(s.heightSource || '') !== 'probe';
+            })
+            .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+        if (recent[0]) {
+            return {
+                chosen: { ...recent[0], height: h, qualityHeight: h, probeQuality: label },
+                how: 'session stream matching itag height after re-click',
+                playingHeight: 0
+            };
+        }
+    }
+
+    return { chosen: null, how: '', playingHeight: 0 };
 }
 
 /** One attempt at one quality. Returns 'captured', 'retry' or 'stop'. */
 async function attemptQualityProbe({ tabId, fileId, option, isFinalQuality, capture, report }) {
     const height = Number(option.height);
-    const label = `${height}p`;
+    // Prefer the live menu label ("480p", "720p HD") over a reconstructed one.
+    const label = String(option.text || option.label || `${height}p`).trim() || `${height}p`;
 
-    const submenu = await openQualitySubmenu(tabId);
-    if (!submenu.ok) {
-        report.reason = submenu.reason;
-        return 'retry';
-    }
-    if (!submenu.options.some(item => Number(item.height) === height)) {
-        report.reason = `${label} is no longer listed in the Quality menu.`;
-        return 'stop';
-    }
+    // URLs already claimed by another menu height must not be reused.
+    const usedUrls = new Set(
+        [...capture.pairsByHeight.values()]
+            .map(pair => streamUrlKey(pair?.video))
+            .filter(Boolean)
+    );
 
-    const { click, result } = await activateQualityAndCollect({
-        tabId, fileId, height, label, options: submenu.options, isFinalQuality, report
+    // One mini-plugin sequence per attempt: Settings → Quality → click label.
+    const { click, result, probeStartedAt, sawNewStream } = await activateQualityAndCollect({
+        tabId, fileId, height, label, options: [option], isFinalQuality, report, usedUrls
     });
 
     const streams = (result.video || []).filter(stream => stream?.url);
-    const { chosen, how, playingHeight } = await pickStreamForQuality({ tabId, height, label, streams, activated: report.activated });
+    const { chosen, how, playingHeight } = await pickStreamForQuality({
+        tabId, height, label, streams, activated: report.activated, usedUrls, probeStartedAt
+    });
 
     for (const audio of (result.audio || [])) capture.discoveredAudio.push({ ...audio, probeQuality: label });
 
+    // Reject if the chosen URL is already stored for another height (belt and suspenders).
+    const chosenKey = streamUrlKey(chosen);
+    if (chosenKey && usedUrls.has(chosenKey)) {
+        report.reason = `${label} resolved to a stream URL already used by another quality.`;
+        return 'retry';
+    }
+
     if (!chosen?.url) {
         report.reason = report.activated
-            ? `${label} was activated but Drive sent no stream request for it.`
+            ? (sawNewStream
+                ? `${label} was activated but no distinct stream URL was captured.`
+                : `${label} was activated but Drive sent no distinct stream URL for it.`)
             : (click?.reason || 'The click could not be performed.');
         return report.activated && playingHeight === height ? 'stop' : 'retry';
     }
@@ -176,23 +253,26 @@ async function attemptQualityProbe({ tabId, fileId, option, isFinalQuality, capt
     report.captured = true;
     report.how = how;
     report.reason = '';
+    report.urlKey = chosenKey || '';
+    report.itag = chosen.itag || '';
     return 'captured';
 }
 
 async function probeQualityOption({ tabId, fileId, option, isFinalQuality, capture }) {
     const height = Number(option.height);
-    const report = { height, label: `${height}p`, attempts: 0, method: '', activated: false, captured: false, how: '', reason: '', steps: [] };
+    const label = String(option.text || option.label || `${height}p`).trim() || `${height}p`;
+    const report = {
+        height, label, attempts: 0, method: '', activated: false,
+        captured: false, how: '', reason: '', steps: []
+    };
 
-    if (hasCapturedStream(capture, height)) {
-        report.captured = true;
-        report.how = 'reused the stream Drive was already playing';
-        return report;
-    }
-
+    // ALWAYS run the click sequence — including when this quality is already
+    // selected. Skipping "current" is what made 480p look like it never clicked.
     for (let attempt = 1; attempt <= SCAN_MAX_ATTEMPTS_PER_QUALITY && !report.captured; attempt++) {
         report.attempts = attempt;
         const outcome = await attemptQualityProbe({ tabId, fileId, option, isFinalQuality, capture, report });
-        if (outcome === 'stop') break;
+        if (outcome === 'captured' || outcome === 'stop') break;
+        if (report.activated && !report.captured) break;
         if (!report.captured) await closePlayerMenu(tabId);
     }
 
@@ -217,9 +297,44 @@ function dedupeCapturedStreams(streams, kind) {
 
 /** Video/audio lists for the picker: per-quality captures first, best quality first. */
 function buildScanFormats(capture) {
-    const qualityVideos = [...capture.pairsByHeight.values()].map(pair => pair?.video).filter(Boolean);
+    // Prefer streams that were explicitly paired to a live menu height during probing.
+    // Rewrite height from the pair key / qualityHeight so itag guesses cannot stick.
+    // One URL → one height. If two menu rows somehow claimed the same stream,
+    // keep the pair whose raw itag/url height matches (or the first recorded).
+    const seenUrls = new Set();
+    const qualityVideos = [...capture.pairsByHeight.values()]
+        .sort((a, b) => Number(b.height || 0) - Number(a.height || 0))
+        .map(pair => {
+            const video = pair?.video;
+            if (!video?.url) return null;
+            const height = Number(pair.height || video.qualityHeight || video.height || 0);
+            if (!height) return null;
+            let key = '';
+            try { key = cleanURL(video.url); } catch (_) { key = String(video.url); }
+            if (key && seenUrls.has(key)) return null;
+            if (key) seenUrls.add(key);
+            return {
+                ...video,
+                height,
+                qualityHeight: height,
+                probeQuality: video.probeQuality || `${height}p`
+            };
+        })
+        .filter(Boolean);
+    const pairedHeights = new Set(qualityVideos.map(s => Number(s.height)).filter(Boolean));
     const qualityHeightOf = stream => Number(stream.qualityHeight || stream.height || 0);
-    const video = dedupeCapturedStreams([...qualityVideos, ...capture.discoveredVideo], 'video')
+    const extras = capture.discoveredVideo.filter(stream => {
+        const h = qualityHeightOf(stream);
+        if (!h || !stream?.url) return false;
+        if (pairedHeights.has(h)) return false;
+        // Skip pure itag-table guesses that were never confirmed by a menu probe.
+        if (String(stream.heightSource || '') === 'itag' && !stream.probeQuality) return false;
+        return true;
+    }).map(stream => {
+        const h = qualityHeightOf(stream);
+        return { ...stream, height: h, qualityHeight: h };
+    });
+    const video = dedupeCapturedStreams([...qualityVideos, ...extras], 'video')
         .sort((a, b) => (qualityHeightOf(b) - qualityHeightOf(a)) || bySizeDesc(a, b));
     const audio = dedupeAudioFormats(dedupeCapturedStreams(capture.discoveredAudio, 'audio')).sort(bySizeDesc);
     // No size probing here: it would delay the hand-off long enough for Drive to rebuild its File menu.
@@ -257,23 +372,39 @@ async function scanQualities(tabId, fileId) {
     const settings = opened.settings || null;
     if (!opened.ok) {
         const frameInfo = settings?.frames || await describePlayerFrames(tabId);
-        console.warn('[GDrive SW] Settings -> Quality could not be opened:', opened.reason, frameInfo);
         return {
             success: false, error: `Drive quality menu: ${opened.reason}`,
             playback, settings, frames: frameInfo, quality: { menu: opened.menu || null, open: opened }
         };
     }
     const optionList = opened.options;
-    console.log('[GDrive SW] Quality options found:', optionList.map(option => option.text || `${option.height}p`).join(', '));
 
-    await captureCurrentQualityStream(tabId, await detectPlayingQualityHeight(tabId, optionList), capture);
+    // Close the discovery menu so each probe starts with a clean
+    // Settings → Quality → row sequence (same as the mini plugin).
+    await closePlayerMenu(tabId);
+    await sleep(FAST_SCAN.optionSettleMs || 200);
 
+    // Seed capture with any streams already seen (real itag heights only).
+    // These can satisfy the fast-path reuse without a menu click.
+    const recent = streamCaptureState(tabId)?.recentStreams || [];
+    for (const stream of recent) {
+        if (!stream?.url || isAudioStream(stream)) continue;
+        if (stream.fileId && fileId && stream.fileId !== fileId) continue;
+        const h = Number(stream.height || 0);
+        const source = String(stream.heightSource || '');
+        if (h > 0 && source !== 'probe') {
+            capture.discoveredVideo.push(stream);
+        }
+    }
+
+    // Highest → lowest.
     const numericOptions = optionList
         .filter(option => Number(option?.height) > 0)
         .sort((a, b) => Number(b.height) - Number(a.height));
     const scanReport = [];
     for (const [index, option] of numericOptions.entries()) {
         const isFinalQuality = index === numericOptions.length - 1;
+        const name = option.text || option.label || `${option.height}p`;
         scanReport.push(await probeQualityOption({ tabId, fileId, option, isFinalQuality, capture }));
     }
     const formats = buildScanFormats(capture);

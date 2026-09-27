@@ -34,10 +34,16 @@ function stopStreamWarmups(jobId) {
     }
 }
 
-/** Slow-start policy: after 10s warmup, sample 2s of progress. Restart only if
- *  almost no bytes arrived OR sustained speed is under 1 Mbps. */
+/** Slow-start policy:
+ *  1) 10s warmup countdown (UI: "Warming up download: Ns")
+ *  2) After warmup → unlock normal download UI and keep downloading
+ *  3) At 15s → sample speed for 2s
+ *     - if ≥ 1 Mbps (or retries exhausted) → continue
+ *     - if < 1 Mbps and retries remain → restart (max 2)
+ */
 const WARMUP_DURATION_MS = 10000;
-const SPEED_CHECK_WINDOW_MS = 2000;
+const SPEED_CHECK_AT_MS = 15000; // start measuring at 15s from download start
+const SPEED_CHECK_MS = 2000;     // sample window length
 const MIN_SPEED_BPS = 125000; // 1 Mbps
 const MAX_SLOW_RESTARTS = 2;
 const activeDownloadMonitors = new Map();
@@ -59,15 +65,18 @@ function startDownloadWarmupMonitor(jobId, tabId, request = {}, attempt = 0) {
         attempt: Number(attempt) || 0,
         timers: [],
         received: { video: 0, audio: 0 },
-        bytesAtWarmupEnd: null,
+        bytesAtCheckStart: 0,
         finished: false
     };
     activeDownloadMonitors.set(jobId, monitor);
 
     const totalSec = Math.round(WARMUP_DURATION_MS / 1000);
+
+    // Countdown messages during warmup (10…1).
     for (let remaining = totalSec; remaining >= 1; remaining--) {
         const timer = setTimeout(() => {
-            if (!activeDownloadMonitors.has(jobId)) return;
+            const current = activeDownloadMonitors.get(jobId);
+            if (!current || current.finished) return;
             sendTab(tabId, {
                 type: 'videoStageWarmup',
                 jobId,
@@ -78,24 +87,35 @@ function startDownloadWarmupMonitor(jobId, tabId, request = {}, attempt = 0) {
         monitor.timers.push(timer);
     }
 
-    const warmupDone = setTimeout(() => {
+    // After warmup: unlock normal download UI and keep downloading.
+    const afterWarmup = setTimeout(() => {
         const current = activeDownloadMonitors.get(jobId);
         if (!current || current.finished) return;
-        current.bytesAtWarmupEnd =
-            (current.received.video || 0) + (current.received.audio || 0);
+
         sendTab(tabId, {
             type: 'videoStageWarmup',
             jobId,
             remainingSec: 0,
             totalSec,
-            phase: 'checking'
+            phase: 'done'
         }).catch?.(() => {});
-        const check = setTimeout(() => {
-            evaluateSlowStartAndMaybeRestart(jobId);
-        }, SPEED_CHECK_WINDOW_MS);
-        current.timers.push(check);
     }, WARMUP_DURATION_MS);
-    monitor.timers.push(warmupDone);
+    monitor.timers.push(afterWarmup);
+
+    // At 15s: snapshot bytes and start a 2s speed sample, then evaluate.
+    const startSample = setTimeout(() => {
+        const current = activeDownloadMonitors.get(jobId);
+        if (!current || current.finished) return;
+
+        current.bytesAtCheckStart =
+            (current.received.video || 0) + (current.received.audio || 0);
+
+        const evaluateTimer = setTimeout(() => {
+            void evaluateSlowStartAndMaybeRestart(jobId);
+        }, SPEED_CHECK_MS);
+        current.timers.push(evaluateTimer);
+    }, SPEED_CHECK_AT_MS);
+    monitor.timers.push(startSample);
 }
 
 function noteDownloadProgress(jobId, label, received) {
@@ -109,40 +129,28 @@ function noteDownloadProgress(jobId, label, received) {
 async function evaluateSlowStartAndMaybeRestart(jobId) {
     const monitor = activeDownloadMonitors.get(jobId);
     if (!monitor || monitor.finished) return;
+
+    // Lock immediately so a late timer cannot double-fire.
     monitor.finished = true;
 
     const total =
         (monitor.received.video || 0) + (monitor.received.audio || 0);
-    const atEnd =
-        monitor.bytesAtWarmupEnd == null ? 0 : monitor.bytesAtWarmupEnd;
-    const delta = Math.max(0, total - atEnd);
-    const speedBps = delta / (SPEED_CHECK_WINDOW_MS / 1000);
-
-    const markDone = () => {
-        clearDownloadMonitor(jobId);
-        sendTab(monitor.tabId, {
-            type: 'videoStageWarmup',
-            jobId,
-            remainingSec: 0,
-            phase: 'done'
-        }).catch?.(() => {});
-    };
-
-    // Keep going if speed is acceptable OR we already have meaningful data.
-    if (speedBps >= MIN_SPEED_BPS || total >= MIN_SPEED_BPS) {
-        markDone();
-        return;
-    }
-
-    // Restart only when nearly empty and still under 1 Mbps.
-    if (monitor.attempt >= MAX_SLOW_RESTARTS) {
-        markDone();
-        return;
-    }
+    const atStart = monitor.bytesAtCheckStart || 0;
+    const delta = Math.max(0, total - atStart);
+    const speedBps = delta / (SPEED_CHECK_MS / 1000);
 
     const tabId = monitor.tabId;
     const request = { ...monitor.request };
-    const nextAttempt = monitor.attempt + 1;
+    const attempt = monitor.attempt;
+
+    // Speed is good, or no retries left → just stop monitoring and keep downloading.
+    if (speedBps >= MIN_SPEED_BPS || attempt >= MAX_SLOW_RESTARTS) {
+        clearDownloadMonitor(jobId);
+        return;
+    }
+
+    // Too slow — restart (up to MAX_SLOW_RESTARTS times).
+    const nextAttempt = attempt + 1;
     clearDownloadMonitor(jobId);
 
     try {
@@ -153,9 +161,10 @@ async function evaluateSlowStartAndMaybeRestart(jobId) {
             phase: 'restarting',
             attempt: nextAttempt
         }).catch?.(() => {});
+
         const job = (await getStoredJobs())[jobId];
         await cancelVideoStage(jobId, job, { silent: true });
-        await new Promise(resolve => setTimeout(resolve, 400));
+        await new Promise(resolve => setTimeout(resolve, 500));
         await startVideoDownload(tabId, {
             ...request,
             _restartAttempt: nextAttempt

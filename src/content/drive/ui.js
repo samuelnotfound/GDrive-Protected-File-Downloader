@@ -269,6 +269,13 @@
             root.classList.remove('cancelled', 'completed', 'unsupported');
             root.querySelector('#psd-inpage-spinner')?.style.setProperty('display', 'block');
             root.querySelector('#psd-inpage-check')?.style.setProperty('display', 'none');
+            root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'flex');
+            const toggle = root.querySelector('#psd-inpage-toggle');
+            if (toggle) {
+                toggle.style.display = 'block';
+                toggle.disabled = false;
+                toggle.textContent = 'Cancel';
+            }
         }
         updateWindowControl();
     }

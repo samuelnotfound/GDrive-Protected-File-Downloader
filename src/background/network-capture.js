@@ -55,18 +55,22 @@ function streamBelongsToSession(candidate, requestUrl, session) {
 
 /**
  * While a quality is being probed, the probe label is the authority for which quality a request belongs to.
- * The label height is only FILLED IN when the URL carries no height itself: stamping it on every request
- * used to record a stray request for the still-playing quality as the quality being probed.
+ * Always record qualityHeight / probeQuality from the menu row we clicked. Only overwrite the raw
+ * height when the URL/itag left it empty — that avoids relabelling a still-playing higher stream
+ * as the quality under test, while still letting the picker key off qualityHeight.
  */
 function tagCandidateWithProbe(candidate, probe) {
     const labelHeight = Number(String(probe.label || '').match(/(\d{3,4})p/i)?.[1] || 0);
     candidate.probeHeight = labelHeight;
-    if (labelHeight && !isAudioStream(candidate) && !Number(candidate.height || 0)) {
-        candidate.height = labelHeight;
-        candidate.heightSource = 'probe';
-    }
     candidate.probeQuality = probe.label || '';
     candidate.probeToken = probe.token || '';
+    if (labelHeight && !isAudioStream(candidate)) {
+        candidate.qualityHeight = labelHeight;
+        if (!Number(candidate.height || 0)) {
+            candidate.height = labelHeight;
+            candidate.heightSource = 'probe';
+        }
+    }
 }
 
 const probeBufferKey = stream => stream.itag
@@ -90,6 +94,11 @@ function storeCandidateInSession(tabId, session, candidate) {
         if (activeProbe && Number(candidate.capturedAt) >= Number(activeProbe.startedAt || 0)) {
             candidate.probeQuality = activeProbe.label || candidate.probeQuality || '';
             candidate.probeToken = activeProbe.token || candidate.probeToken || '';
+            const labelHeight = Number(String(activeProbe.label || '').match(/(\d{3,4})p/i)?.[1] || 0);
+            if (labelHeight && !isAudioStream(candidate)) {
+                candidate.qualityHeight = labelHeight;
+                candidate.probeHeight = labelHeight;
+            }
             current.probeCandidates = addUniqueCandidate(current.probeCandidates, candidate, PROBE_BUFFER_LIMIT);
         }
 
