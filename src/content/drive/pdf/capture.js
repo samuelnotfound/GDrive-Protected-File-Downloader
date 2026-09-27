@@ -15,7 +15,6 @@
     const POLL_INTERVAL = 35;
     const IMAGE_STABLE_MS = 60;
     const PAGE_NAV_WAIT = 400;
-    const SCROLL_SETTLE = 60;
     const RING_CIRCUMFERENCE = 2 * Math.PI * 17;
 
     const reportProgress = (status, detail, percent = null) =>
@@ -374,50 +373,6 @@
         return getPageInput()?.current === pageNumber;
     }
 
-    let scrollRootsCache = null;
-    let scrollRootsCacheAt = 0;
-
-    function getScrollableElements(force = false) {
-        const now = performance.now();
-        if (!force && scrollRootsCache && now - scrollRootsCacheAt < 1000) return scrollRootsCache;
-
-        const roots = [];
-        const candidates = [
-            document.scrollingElement,
-            document.documentElement,
-            document.body,
-            ...document.querySelectorAll('*')
-        ];
-
-        for (const element of candidates) {
-            if (!element || element.scrollHeight <= element.clientHeight + 50) continue;
-            if (getComputedStyle(element).overflowY === 'hidden') continue;
-            roots.push(element);
-        }
-
-        scrollRootsCache = [...new Set(roots)].sort((a, b) =>
-            (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight)
-        );
-        scrollRootsCacheAt = now;
-        return scrollRootsCache;
-    }
-
-    function scrollViewerStep(roots = getScrollableElements()) {
-        for (const root of roots.slice(0, 2)) {
-            const before = root.scrollTop;
-            const max = root.scrollHeight - root.clientHeight;
-            if (max <= before + 2) continue;
-
-            root.scrollTop = Math.min(
-                max,
-                before + Math.max(500, Math.floor(root.clientHeight * 0.88))
-            );
-            if (root.scrollTop !== before) return true;
-        }
-
-        return false;
-    }
-
     function resetCaptureState() {
         pdf.pages.clear();
         pdf.capturedPages.clear();
@@ -527,42 +482,6 @@
             );
         }
     }
-
-    async function capturePagesByScrolling(totalHint) {
-        let roots = getScrollableElements(true);
-        let noNewPasses = 0;
-
-        for (let step = 0; step < 1200 && !pdf.stopRequested; step++) {
-            if (step % 20 === 0) roots = getScrollableElements(true);
-
-            const before = pdf.pages.size;
-            const moved = scrollViewerStep(roots);
-
-            await app.sleep(SCROLL_SETTLE);
-            scanRenderedPages();
-
-            const added = pdf.pages.size - before;
-            noNewPasses = added ? 0 : noNewPasses + 1;
-
-            const percent = totalHint
-                ? Math.min(50, Math.floor(Math.min(pdf.pages.size, totalHint) / totalHint * 50))
-                : Math.min(50, Math.floor(step / 1200 * 50));
-
-            reportProgress(
-                'Preparing…',
-                `Capturing ${pdf.pages.size}${totalHint ? ` / ${totalHint}` : ''}`,
-                percent
-            );
-
-            if (!moved && noNewPasses >= 3) break;
-            if (
-                roots.length &&
-                roots.every(root => root.scrollTop >= root.scrollHeight - root.clientHeight - 10) &&
-                noNewPasses >= 3
-            ) break;
-        }
-    }
-
 
     function finishCancelledCapture() {
         app.ui.showScrollDim(false);

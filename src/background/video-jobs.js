@@ -1,39 +1,5 @@
 
 
-async function fetchDrivePlaybackFormats(fileId, tabId) {
-    const id = String(fileId || '').trim();
-    if (!id) throw new Error('Drive file ID was not detected.');
-    const endpoint = `https://content-workspacevideo-pa.googleapis.com/v1/drive/media/${encodeURIComponent(id)}/playback?key=${encodeURIComponent(DRIVE_PLAYBACK_API_KEY)}`;
-    const response = await fetch(endpoint, {
-        method: 'GET',
-        credentials: 'include',
-        cache: 'no-store',
-        referrer: 'https://drive.google.com/',
-        headers: { 'Accept': 'application/json' }
-    });
-    if (!response.ok) throw new Error(`Drive playback metadata request failed (${response.status}).`);
-    const payload = await response.json();
-    const rawFormats = parsePlaybackFormats(payload);
-    const session = await getStoredSession(tabId);
-    const combined = {
-        video: mergeFormatLists(session?.formats?.video, rawFormats.video, byHeightWidthThenSize),
-        audio: mergeFormatLists(session?.formats?.audio, rawFormats.audio, bySizeDesc),
-        progressive: mergeFormatLists(session?.formats?.progressive, rawFormats.progressive, byHeightWidthThenSize)
-    };
-    const formats = await validateFormatSet(combined, id);
-    if (!formats.video.length && !formats.audio.length && !formats.progressive.length) {
-        throw new Error('Drive returned no currently playable playback formats.');
-    }
-
-    if (session && (!session.fileId || session.fileId === id)) {
-        session.fileId = id;
-        session.formats = formats;
-        session.formatsFetchedAt = Date.now();
-        await setStoredSession(tabId, session);
-        await sendTab(tabId, { type: 'videoFormatsDetected', formats, fileId: id, viewerSessionId: session.viewerSessionId });
-    }
-    return formats;
-}
 
 async function ensureVideoOffscreen() {
     const url = chrome.runtime.getURL('src/offscreen/video-offscreen.html');
@@ -135,16 +101,6 @@ function validateDownloadContext(session, request) {
     return '';
 }
 
-async function refreshStaleFormats(session, tabId) {
-    const formatAge = Date.now() - Number(session.formatsFetchedAt || 0);
-    if (!session.fileId || formatAge <= 45_000) return session;
-    try {
-        await fetchDrivePlaybackFormats(session.fileId, tabId);
-        return await getStoredSession(tabId) || session;
-    } catch (_) {
-        return session;
-    }
-}
 
 function selectFormats(session, request) {
     const formats = session?.formats || { video: [], audio: [], progressive: [] };
@@ -188,7 +144,7 @@ async function startVideoDownload(tabId, request = {}) {
     const contextError = validateDownloadContext(session, request);
     if (contextError) return { success: false, error: contextError };
 
-    session = await refreshStaleFormats(session, tabId);
+    // Formats come from quality probe + network capture only (no Drive playback API).
     const selected = selectFormats(session, request);
     if (!selected) {
         return {

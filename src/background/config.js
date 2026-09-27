@@ -1,7 +1,5 @@
-const DRIVE_PLAYBACK_API_KEY = 'AIzaSyDVQw45DwoYh632gvsP5vPDqEKvb-Ywnb8';
 const STREAM_STORE_KEY = 'videoSessions';
 const JOB_STORE_KEY = 'videoStageJobs';
-const FORMAT_PROBE_TIMEOUT_MS = 6500;
 
 const STREAM_CAPTURE_TABS = new Map();
 const QUALITY_SCAN_RUNNING = new Map();
