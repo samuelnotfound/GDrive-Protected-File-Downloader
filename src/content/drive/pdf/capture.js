@@ -8,7 +8,10 @@
     const MIN_H = 300;
     const IMAGE_WAIT_FAST = 1200;
     const IMAGE_WAIT_RECOVERY = 1800;
-    const PAGE_COUNT_WAIT = 800;
+    // Wait long enough for Drive's viewer chrome (page input + total) to appear
+    // when the user clicks Download before the document has finished loading.
+    const PAGE_COUNT_WAIT = 12000;
+    const VIEWER_READY_WAIT = 15000;
     const POLL_INTERVAL = 35;
     const IMAGE_STABLE_MS = 60;
     const PAGE_NAV_WAIT = 400;
@@ -202,19 +205,83 @@
     async function waitForPageInfo(timeout = PAGE_COUNT_WAIT) {
         const deadline = performance.now() + timeout;
         let lastMax = null;
+        let stableHits = 0;
         let firstCheck = true;
 
         while (!pdf.stopRequested && performance.now() < deadline) {
             const info = getPageInput(firstCheck);
             firstCheck = false;
-            const max = info?.max || getPageCountHint();
+            const max = Number(info?.max || getPageCountHint() || 0);
+            const current = Number(info?.current || 0);
 
-            if (info?.current >= 1 && max >= 1) {
-                if (max === lastMax) return { ...info, max };
-                lastMax = max;
+            // Require a real page control with a known total (not 0 / NaN).
+            if (info?.input && current >= 1 && max >= 1) {
+                if (max === lastMax) {
+                    stableHits += 1;
+                    // Two stable reads so we do not start on a half-initialized max.
+                    if (stableHits >= 2) return { ...info, current, max };
+                } else {
+                    lastMax = max;
+                    stableHits = 1;
+                }
+            } else {
+                lastMax = null;
+                stableHits = 0;
             }
 
-            await app.sleep(40);
+            await app.sleep(50);
+        }
+
+        return null;
+    }
+
+    /**
+     * Wait until the Drive PDF viewer has both:
+     *  - a confirmed page count (current + max on the page input), and
+     *  - at least one rendered page image ready to capture.
+     * Returns null if the viewer never becomes ready (do not scroll blindly).
+     */
+    async function waitForViewerReady(timeout = VIEWER_READY_WAIT) {
+        const deadline = performance.now() + timeout;
+        let lastReport = 0;
+
+        while (!pdf.stopRequested && performance.now() < deadline) {
+            const now = performance.now();
+            if (now - lastReport > 400) {
+                reportProgress('Preparing…', 'Waiting for pages to load…', 0);
+                lastReport = now;
+            }
+
+            // Prefer a full waitForPageInfo slice so max stabilizes.
+            const remaining = deadline - performance.now();
+            if (remaining <= 0) break;
+
+            const pageInfo = await waitForPageInfo(Math.min(1500, remaining));
+            if (!pageInfo?.max) {
+                await app.sleep(80);
+                continue;
+            }
+
+            // Confirm at least one page image is actually rendered.
+            scanRenderedPages(pageInfo.current);
+            const img = getCurrentPageImage();
+            const src = img?.currentSrc || img?.src || '';
+            const imageReady =
+                img &&
+                img.complete &&
+                src.startsWith(PREFIX) &&
+                img.naturalWidth >= MIN_W &&
+                img.naturalHeight >= MIN_H;
+
+            if (imageReady) {
+                return {
+                    pageInfo,
+                    totalHint: pageInfo.max,
+                    firstImage: img
+                };
+            }
+
+            await app.sleep(80);
         }
 
         return null;
@@ -540,9 +607,19 @@
     }
 
     async function captureDocumentPages(pageInfo, totalHint) {
-        // Single pass only — no recovery pass / no extra navigation.
-        if (pageInfo && totalHint) await capturePagesByNumber(totalHint);
-        else await capturePagesByScrolling(totalHint);
+        // Only capture by page number once the viewer reported a real total.
+        // Blind scrolling without a page count is what ran when Download was
+        // clicked before pages finished loading — that path is no longer used.
+        if (!pageInfo || !totalHint || totalHint < 1) {
+            reportProgress(
+                'Viewer not ready',
+                'Page count is not available yet. Wait for the document to load, then try again.',
+                0
+            );
+            return false;
+        }
+
+        await capturePagesByNumber(totalHint);
 
         if (pdf.stopRequested) {
             finishCancelledCapture();
@@ -583,8 +660,36 @@
         }
 
         beginCapture();
-        const pageInfo = await waitForPageInfo();
-        const totalHint = pageInfo?.max || getPageCountHint();
+        reportProgress('Preparing…', 'Waiting for pages to load…', 0);
+
+        // Do not scroll or capture until Drive exposes a stable page total
+        // and at least one page image is rendered.
+        const ready = await waitForViewerReady();
+        if (pdf.stopRequested) {
+            finishCancelledCapture();
+            return;
+        }
+
+        if (!ready?.pageInfo || !ready?.totalHint) {
+            pdf.status = 'idle';
+            app.ui.showScrollDim(false);
+            app.ui.updateWindowControl();
+            reportProgress(
+                'Viewer not ready',
+                'Could not read the number of pages. Wait until the document finishes loading, then try Download again.',
+                0
+            );
+            const root = document.getElementById('psd-inpage-overlay');
+            if (root) {
+                root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
+                setTimeout(() => app.ui.showInPageOverlay(false), 2500);
+            }
+            return;
+        }
+
+        const { pageInfo, totalHint } = ready;
+        reportProgress('Preparing…', `Found ${totalHint} page${totalHint === 1 ? '' : 's'}`, 0);
+
         if (await captureDocumentPages(pageInfo, totalHint)) await finishCapture(totalHint);
     }
 
