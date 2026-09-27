@@ -204,6 +204,8 @@
 
             if (target.closest('#psd-video-quality-download')) {
                 setQualityDropdownOpen(root, false);
+                const btn = root.querySelector('#psd-video-quality-download');
+                if (btn?.disabled || video.operation === 'staging' || videoOverlay.getJobId?.()) return;
                 void downloadFromPicker();
                 return;
             }
@@ -735,8 +737,15 @@
         populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect, video.qualityMenuOptions), formatVideoLabel, emptyText);
 
         const valid = !!(videoSelect.value && (hasProgressive || (hasAdaptiveVideo && hasAudio)));
-        download.disabled = !valid;
-        status.textContent = valid ? '' : 'Waiting for a usable Drive stream…';
+        const downloadBusy =
+            video.operation === 'staging' ||
+            !!videoOverlay.getJobId?.();
+        download.disabled = !valid || downloadBusy;
+        if (downloadBusy) {
+            status.textContent = 'Download in progress…';
+        } else {
+            status.textContent = valid ? '' : 'Waiting for a usable Drive stream…';
+        }
 
         const mountedItem = root.closest?.('#' + VIDEO_MENU_ID);
         if (mountedItem) syncQualityPickerTypography(mountedItem);
@@ -904,6 +913,16 @@
 
     async function downloadFromPicker() {
         core.muteMediaImmediately();
+
+        // Disallow starting another download while one is already running.
+        if (video.operation === 'staging' || videoOverlay.getJobId?.()) {
+            const root = document.getElementById('psd-video-quality-picker');
+            const button = root?.querySelector('#psd-video-quality-download');
+            const status = root?.querySelector('#psd-video-quality-status');
+            if (button) button.disabled = true;
+            if (status) status.textContent = 'Download in progress…';
+            return;
+        }
 
         const root = ensureQualityPicker();
         const request = getPickerDownloadRequest(root);

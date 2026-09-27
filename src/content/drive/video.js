@@ -52,7 +52,10 @@
 
     function updateVideoMenuState() {
         const hasFormats = (video.formats?.video?.length || video.formats?.progressive?.length) > 0;
-        const labelText = video.operation === 'picker' ? 'Choose video quality' : 'Download';
+        const downloadBusy = video.operation === 'staging' || !!videoOverlay.getJobId?.();
+        const labelText = downloadBusy
+            ? 'Downloading…'
+            : (video.operation === 'picker' ? 'Choose video quality' : 'Download');
 
         document.querySelectorAll('#' + VIDEO_MENU_ID).forEach(item => {
             normalizeQualityMenuItem(item);
@@ -66,12 +69,22 @@
             item.setAttribute('aria-label', labelText);
             item.dataset.streamReady = hasFormats ? 'true' : 'false';
             item.dataset.playbackReady = video.playbackStarted ? 'true' : 'false';
-            item.removeAttribute('aria-disabled');
-            item.removeAttribute('disabled');
-            item.style.cursor = 'pointer';
-            item.style.opacity = '1';
-            item.style.pointerEvents = 'auto';
-            item.tabIndex = 0;
+
+            if (downloadBusy) {
+                item.setAttribute('aria-disabled', 'true');
+                item.setAttribute('disabled', 'true');
+                item.style.cursor = 'default';
+                item.style.opacity = '0.55';
+                item.style.pointerEvents = 'none';
+                item.tabIndex = -1;
+            } else {
+                item.removeAttribute('aria-disabled');
+                item.removeAttribute('disabled');
+                item.style.cursor = 'pointer';
+                item.style.opacity = '1';
+                item.style.pointerEvents = 'auto';
+                item.tabIndex = 0;
+            }
         });
     }
 
@@ -268,6 +281,8 @@
 
     async function startVideoFromMenu() {
         core.muteMediaImmediately();
+        // Block while a download job is active.
+        if (video.operation === 'staging' || videoOverlay.getJobId?.()) return;
         if (video.operation !== 'idle') return;
 
         if (cachedScanUsable() || core.hasUsableFormats(video.pickerFormats)) {
@@ -477,6 +492,8 @@
             }
         }
         updateVideoMenuState();
+        // Re-enable the in-menu Download button if the picker is still open.
+        try { quality.update?.(); } catch (_) {}
         videoOverlay.update({ stage, ...(message ? { message } : {}) });
     }
 
