@@ -70,7 +70,6 @@ Please refer to those projects for their licenses, source, and notices.
 
 - This project was built with assistance from AI tools during development, debugging, refactoring, and documentation.
 - It does not remove access restrictions, bypass authentication, or grant access to files the user cannot already view.
-- Do not use this extension to circumvent access controls, permissions, copyright, or other restrictions set by the file owner.
 - You are responsible for complying with Google Drive’s Terms of Service and applicable law.
 
 This project is provided as-is.
