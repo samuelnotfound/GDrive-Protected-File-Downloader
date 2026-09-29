@@ -38,7 +38,11 @@ function filterProbeCandidates(all = [], token = '') {
     const list = Array.isArray(all) ? all : [];
     const filtered = token ? list.filter(item => item?.probeToken === token) : list;
     return {
-        video: filtered.filter(item => /video/i.test(String(item?.mime || '')) || (!/audio/i.test(String(item?.mime || '')) && item?.itag)),
+        // Exclude audio itags even when mime is missing (Drive often omits it).
+        video: filtered.filter(item => {
+            if (!item?.url || isAudioStream(item)) return false;
+            return /video/i.test(String(item?.mime || '')) || !!item?.itag || Number(item?.height || 0) > 0;
+        }),
         audio: filtered.filter(isAudioStream)
     };
 }

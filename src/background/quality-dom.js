@@ -51,9 +51,33 @@ async function getTargetFrameIds(tabId, frameId) {
     return ids.length ? ids : [0];
 }
 
+/**
+ * Run a quality-trigger action across frames.
+ * When options.frameId is set, only that frame is targeted.
+ * When options.stopOnFirstOk is true (default for click actions), frames are
+ * tried sequentially and the first success wins — avoids broadcasting a click
+ * into every frame at once (open-in-one / close-in-another race).
+ */
 async function runQualityDom(tabId, action, params = {}, options = {}) {
     const frameIds = await getTargetFrameIds(tabId, options.frameId);
     const args = [params || {}];
+    const stopOnFirstOk = options.stopOnFirstOk === true
+        || /^(clickLabel|clickQuality|closeMenu)$/.test(String(action || ''));
+
+    if (stopOnFirstOk && frameIds.length > 1 && !Number.isInteger(options.frameId)) {
+        const hits = [];
+        for (const frameId of frameIds) {
+            try {
+                const row = await callTriggerInFrame(tabId, frameId, action, args);
+                if (row?.value) {
+                    hits.push(row);
+                    if (row.value.ok) return hits;
+                }
+            } catch (_) {}
+        }
+        return hits;
+    }
+
     const settled = await Promise.allSettled(frameIds.map(frameId => callTriggerInFrame(tabId, frameId, action, args)));
     return settled
         .map(entry => (entry.status === 'fulfilled' ? entry.value : null))
@@ -62,16 +86,6 @@ async function runQualityDom(tabId, action, params = {}, options = {}) {
 
 function firstOk(rows) {
     return rows.find(row => row.value?.ok) || null;
-}
-
-async function pollQualityDom(tabId, action, params = {}, timeoutMs = 3000, pollMs = 120) {
-    const deadline = Date.now() + timeoutMs;
-    do {
-        const ok = firstOk(await runQualityDom(tabId, action, params));
-        if (ok) return ok;
-        await sleep(pollMs);
-    } while (Date.now() < deadline);
-    return null;
 }
 
 async function playWithDom(tabId, frames = []) {
@@ -91,73 +105,6 @@ async function playWithDom(tabId, frames = []) {
         method: 'trigger autoplay exhausted',
         error: 'The Drive player did not enter a confirmed playing state.',
         frames: frames.length
-    };
-}
-
-async function clickTriggerLabel(tabId, labels, timeoutMs, reveal = false) {
-    return pollQualityDom(
-        tabId,
-        'clickLabel',
-        { labels, contains: false, reveal },
-        timeoutMs,
-        FAST_SCAN.menuPollMs
-    );
-}
-
-async function openPlayerSettingsMenu(tabId) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        await runQualityDom(tabId, 'revealControls');
-        const opened = await clickTriggerLabel(
-            tabId,
-            TRIGGER_SETTINGS_LABELS,
-            FAST_SCAN.settingsTimeoutMs,
-            true
-        );
-        if (opened) {
-            await sleep(FAST_SCAN.settingsClickSettleMs);
-            const afterSettings = await waitForQualityMenuRow(tabId, FAST_SCAN.menuTimeoutMs);
-            return {
-                ok: true,
-                method: 'trigger-settings-click',
-                attempts: attempt,
-                frameId: opened.frameId,
-                label: opened.value.label || '',
-                afterSettings
-            };
-        }
-        await sleep(FAST_SCAN.retrySettleMs);
-    }
-    return {
-        ok: false,
-        reason: 'The Drive player Settings control was not found in any frame.',
-        frames: await describePlayerFrames(tabId)
-    };
-}
-
-async function waitForQualityMenuRow(tabId, timeoutMs = FAST_SCAN.menuTimeoutMs) {
-    const found = await pollQualityDom(
-        tabId, 'findLabel',
-        { labels: TRIGGER_QUALITY_LABELS, contains: true },
-        timeoutMs, FAST_SCAN.menuPollMs
-    );
-    if (!found) return { ok: false, qualityTarget: { ok: false }, reason: 'Timed out waiting for the Quality row.' };
-    return { ok: true, qualityTarget: { ok: true, frameId: found.frameId, text: found.value.label || 'Quality' } };
-}
-
-async function clickQualityMenuRow(tabId, qualityTarget) {
-    const opened = await clickTriggerLabel(
-        tabId,
-        TRIGGER_QUALITY_LABELS,
-        FAST_SCAN.qualityTimeoutMs,
-        false
-    );
-    if (!opened) return { ok: false, reason: 'The Quality row could not be clicked.' };
-    await sleep(FAST_SCAN.qualityClickSettleMs);
-    return {
-        ok: true,
-        frameId: opened.frameId,
-        method: 'trigger-quality-click',
-        requestedFrameId: Number.isInteger(qualityTarget?.frameId) ? Number(qualityTarget.frameId) : null
     };
 }
 

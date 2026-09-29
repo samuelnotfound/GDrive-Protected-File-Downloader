@@ -54,31 +54,11 @@
     }
 
     async function restoreQualitySnapshot(fileId = video.fileId) {
-        const id = String(fileId || '').trim();
-        if (!id) return false;
-
-        try {
-            const response = await sendRuntime({ action: 'loadQualityPickerSnapshot', fileId: id });
-            const snapshot = response?.success ? response.snapshot : null;
-            if (!snapshot?.formats || !hasUsableFormats(snapshot.formats)) return false;
-            if (snapshot.savedAt && Date.now() - Number(snapshot.savedAt) > 30 * 60 * 1000) return false;
-
-            video.pickerFormats = cloneFormats(snapshot.formats);
-            video.formats = cloneFormats(video.pickerFormats);
-            video.qualityMenuOptions = Array.isArray(snapshot.menuOptions) ? snapshot.menuOptions.slice() : [];
-            video.scanCache = {
-                fileId: id,
-                at: Number(snapshot.savedAt) || Date.now(),
-                heightCount: new Set([
-                    ...video.pickerFormats.video,
-                    ...video.pickerFormats.progressive
-                ].map(format => Number(format.height) || 0).filter(Boolean)).size,
-                note: ''
-            };
-            return true;
-        } catch (_) {
-            return false;
-        }
+        // Never restore stream URLs across a page refresh. Signed Drive URLs go
+        // stale and must be re-captured in this page lifetime only.
+        // In-memory pickerFormats (same tab, no reload) is still used via
+        // video.restorePickerOnFileMenuOpen without hitting storage.
+        return false;
     }
 
     function isVideoViewerOpen() {

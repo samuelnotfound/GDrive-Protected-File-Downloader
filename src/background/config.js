@@ -15,11 +15,12 @@ const FAST_SCAN = Object.freeze({
     qualityClickSettleMs: 200,
     optionClickSettleMs: 450,
     optionSettleMs: 120,
-    streamWaitMs: 650,
-    finalStreamWaitMs: 250,
-    streamPollMs: 35,
-    qualitySwitchDwellMs: 250,
-    finalQualitySwitchDwellMs: 0,
+    // Give Drive time to issue a NEW itag after a quality click (must be unique per height).
+    streamWaitMs: 1800,
+    finalStreamWaitMs: 2000,
+    streamPollMs: 40,
+    qualitySwitchDwellMs: 500,
+    finalQualitySwitchDwellMs: 600,
     finalMenuCloseWaitMs: 220,
     retrySettleMs: 140,
 });

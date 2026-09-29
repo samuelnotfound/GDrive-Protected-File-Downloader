@@ -12,9 +12,12 @@
     const MAX_SEEN = 120;
     let lastReadyReply = 0;
     const TARGET = '*';
+    // Drive adaptive streams are served from *.googlevideo.com (not drive.google.com).
+    // Without this host, every real videoplayback URL is silently dropped.
     const trustedHost = host => {
         const h = String(host || '').toLowerCase();
         return h === 'drive.google.com' || h.endsWith('.drive.google.com') ||
+            h === 'googlevideo.com' || h.endsWith('.googlevideo.com') ||
             h.endsWith('.googleusercontent.com') || h === 'googleusercontent.com';
     };
 

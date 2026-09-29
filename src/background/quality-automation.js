@@ -12,15 +12,16 @@ async function resumePlaybackAfterQualitySwitch(tabId) {
     return rows.some(row => row.value?.ok);
 }
 
-async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = false) {
+async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = false, preferredFrameId = null) {
     const deadline = Date.now() + timeoutMs;
+    const frameScope = Number.isInteger(preferredFrameId) ? { frameId: Number(preferredFrameId) } : {};
     while (Date.now() < deadline) {
         if (reveal) {
-            try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+            try { await runQualityDom(tabId, 'revealControls', {}, frameScope); } catch (_) {}
         }
         const hit = firstOk(await runQualityDom(tabId, 'clickLabel', {
             labels, contains: false, reveal: !!reveal
-        }));
+        }, frameScope));
         if (hit?.value?.ok) {
             return { ok: true, frameId: hit.frameId, label: hit.value.label || labelName };
         }
@@ -32,17 +33,19 @@ async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = f
 /**
  * Click a quality row and require it to actually select (aria-checked).
  * Uses both clickLabel and clickQuality for reliability.
+ * When preferredFrameId is set, only that frame is targeted (avoids dual-frame click races).
  */
-async function selectQualityVerified(tabId, label, height, timeoutMs) {
+async function selectQualityVerified(tabId, label, height, timeoutMs, preferredFrameId = null) {
     const candidates = [label, `${label} resolution`, `${label} quality`, `${height}p`];
     const deadline = Date.now() + timeoutMs;
+    const frameScope = Number.isInteger(preferredFrameId) ? { frameId: Number(preferredFrameId) } : {};
     while (Date.now() < deadline) {
         // Prefer dedicated clickQuality (role=menuitemradio matching).
         const viaQuality = firstOk(await runQualityDom(tabId, 'clickQuality', {
             height: Number(height) || 0,
             label,
             mode: 'click'
-        }));
+        }, frameScope));
         if (viaQuality?.value?.ok) {
             await sleep(FAST_SCAN.optionClickSettleMs);
             // Confirm selected if the trigger reports it; otherwise accept the click.
@@ -53,7 +56,7 @@ async function selectQualityVerified(tabId, label, height, timeoutMs) {
 
         const viaLabel = firstOk(await runQualityDom(tabId, 'clickLabel', {
             labels: candidates, contains: false, reveal: false
-        }));
+        }, frameScope));
         if (viaLabel?.value?.ok) {
             await sleep(FAST_SCAN.optionClickSettleMs);
             return { ok: true, frameId: viaLabel.frameId, label: viaLabel.value.label || label, method: 'clickLabel' };
@@ -65,6 +68,7 @@ async function selectQualityVerified(tabId, label, height, timeoutMs) {
 
 /**
  * Full sequence for one quality — same shape as mini plugin, with verification.
+ * Once Settings opens in a frame, stick to that frame for Quality + option clicks.
  */
 async function applyQualityLikeMini(tabId, label, height = 0) {
     await closePlayerMenu(tabId);
@@ -78,11 +82,16 @@ async function applyQualityLikeMini(tabId, label, height = 0) {
     if (!settings.ok) return { ok: false, step: 'settings', reason: settings.reason };
     await sleep(FAST_SCAN.settingsClickSettleMs);
 
+    // Stick to the frame that opened Settings so we never click Quality in a sibling frame.
+    const frameId = Number.isInteger(settings.frameId) ? settings.frameId : null;
+
     const quality = await clickMenuLikeMini(
-        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false
+        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false, frameId
     );
     if (!quality.ok) return { ok: false, step: 'quality-row', reason: quality.reason };
     await sleep(FAST_SCAN.qualityClickSettleMs);
+
+    const activeFrame = Number.isInteger(quality.frameId) ? quality.frameId : frameId;
 
     // Confirm quality options are visible before clicking a row.
     const listed = await listQualityOptions(tabId);
@@ -91,7 +100,7 @@ async function applyQualityLikeMini(tabId, label, height = 0) {
         return { ok: false, step: 'quality-missing', reason: `${label} not in open Quality menu.` };
     }
 
-    const selected = await selectQualityVerified(tabId, label, height, FAST_SCAN.qualityTimeoutMs);
+    const selected = await selectQualityVerified(tabId, label, height, FAST_SCAN.qualityTimeoutMs, activeFrame);
     if (!selected.ok) return { ok: false, step: 'quality-option', reason: selected.reason };
 
     return { ok: true, method: selected.method || 'mini-sequence', settings, quality, selected, label };
@@ -135,8 +144,10 @@ async function openQualitySubmenu(tabId, menuWaitMs = 2500) {
     }
     await sleep(FAST_SCAN.settingsClickSettleMs);
 
+    // Stick to the Settings frame for the Quality row click.
+    const frameId = Number.isInteger(settings.frameId) ? settings.frameId : null;
     const quality = await clickMenuLikeMini(
-        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false
+        tabId, TRIGGER_QUALITY_LABELS, 'Quality', FAST_SCAN.qualityTimeoutMs, false, frameId
     );
     if (!quality.ok) {
         return { ok: false, reason: quality.reason || 'Quality row not found.', settings, quality };

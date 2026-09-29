@@ -102,37 +102,137 @@ function validateDownloadContext(session, request) {
 }
 
 
-function selectFormats(session, request) {
-    const formats = session?.formats || { video: [], audio: [], progressive: [] };
-    const find = (list, id) => Array.isArray(list) ? list.find(item => item?.id === id) : null;
-    const wantHeight = Number(request?.qualityHeight || 0);
+function pickBestAudioFromPools(session, tabId) {
+    // Audio is a single shared track for the file — prefer the locked session.audio.
+    if (session?.audio) {
+        return {
+            url: cleanURL(session.audioOriginal || session.audio) || session.audio,
+            originalUrl: session.audioOriginal || session.audio,
+            contentLength: getStreamBytes(session.audioOriginal || session.audio),
+            mime: session.formats?.audio?.[0]?.mime || 'audio/mp4',
+            itag: session.formats?.audio?.[0]?.itag || ''
+        };
+    }
 
+    const pools = [
+        ...(Array.isArray(session?.formats?.audio) ? session.formats.audio : []),
+        ...(Array.isArray(session?.audioCandidates) ? session.audioCandidates : []),
+        ...(tabId != null ? (streamCaptureState(tabId)?.recentStreams || []).filter(isAudioStream) : [])
+    ].filter(item => item?.url);
+
+    const globalAudio = typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null;
+    if (globalAudio?.url) pools.push(globalAudio);
+
+    const deduped = dedupeAudioFormats(pools);
+    const best = deduped.sort((a, b) =>
+        (Number(b.contentLength || 0) - Number(a.contentLength || 0)) ||
+        (Number(b.capturedAt || 0) - Number(a.capturedAt || 0))
+    )[0] || null;
+    if (best?.url) return best;
+
+    const urlOnly = getBestAudioURL(session);
+    if (!urlOnly) return null;
+    return {
+        url: cleanURL(urlOnly),
+        originalUrl: urlOnly,
+        contentLength: getStreamBytes(urlOnly)
+    };
+}
+
+function pickVideoFromPools(session, request, tabId) {
+    const formats = session?.formats || { video: [], audio: [], progressive: [] };
+    const find = (list, id) => Array.isArray(list) ? list.find(item => item?.id === id && item?.url) : null;
+    const wantHeight = Number(request?.qualityHeight || 0);
+    const heightOf = item => Number(item?.qualityHeight || item?.height || 0);
+
+    // Progressive (muxed) streams — single-file download.
     const selectedProgressive = find(formats.progressive, request.progressiveFormatId)
         || (wantHeight
-            ? (formats.progressive || []).find(item =>
-                Number(item?.qualityHeight || item?.height || 0) === wantHeight && item?.url)
+            ? (formats.progressive || []).find(item => heightOf(item) === wantHeight && item?.url)
             : null);
     if (selectedProgressive) return { mode: 'single', media: selectedProgressive };
 
     // Prefer the stream whose qualityHeight matches the menu row the user picked.
     let video = wantHeight
-        ? (formats.video || []).find(item =>
-            Number(item?.qualityHeight || item?.height || 0) === wantHeight && item?.url)
+        ? (formats.video || []).find(item => heightOf(item) === wantHeight && item?.url)
         : null;
     if (!video) video = find(formats.video, request.videoFormatId);
-    let audio = find(formats.audio, request.audioFormatId);
-    if (!video && formats.video?.length) video = formats.video[0];
-    if (!audio && formats.audio?.length) audio = formats.audio[0];
-    if (video?.url && audio?.url) return { mode: 'adaptive', video, audio };
+    if (!video && formats.video?.length) {
+        video = formats.video.find(item => item?.url) || formats.video[0];
+    }
 
-    const capturedVideo = Array.isArray(session?.videoCandidates) ? session.videoCandidates[0] : null;
-    const capturedAudioUrl = getBestAudioURL(session);
-    if (capturedVideo?.url && capturedAudioUrl) {
+    // Fall back to session video candidates / recent in-memory streams.
+    if (!video?.url) {
+        const candidates = [
+            ...(Array.isArray(session?.videoCandidates) ? session.videoCandidates : []),
+            ...(tabId != null
+                ? (streamCaptureState(tabId)?.recentStreams || []).filter(s => s?.url && !isAudioStream(s))
+                : [])
+        ];
+        if (wantHeight) {
+            video = candidates.find(item => heightOf(item) === wantHeight && item?.url)
+                || candidates.find(item => Number(item?.height || 0) === wantHeight && item?.url);
+        }
+        if (!video?.url) video = candidates.find(item => item?.url) || null;
+    }
+
+    // Session-level last-seen video URL.
+    if (!video?.url && session?.video) {
+        video = {
+            url: session.video,
+            originalUrl: session.videoOriginal || session.video,
+            contentLength: getStreamBytes(session.videoOriginal || session.video),
+            height: wantHeight || 0,
+            qualityHeight: wantHeight || 0
+        };
+    }
+
+    return video?.url ? { mode: 'adaptive', video } : null;
+}
+
+function selectFormats(session, request, tabId = null) {
+    const progressiveOrVideo = pickVideoFromPools(session, request, tabId);
+    if (!progressiveOrVideo) return null;
+    if (progressiveOrVideo.mode === 'single') return progressiveOrVideo;
+
+    const video = progressiveOrVideo.video;
+
+    // Muxed URL in the video list — download as a single progressive file.
+    if (video?.url && isMuxedStream(video)) {
+        return { mode: 'single', media: { ...video, progressive: true } };
+    }
+
+    let audio = null;
+    const formats = session?.formats || { video: [], audio: [], progressive: [] };
+    const find = (list, id) => Array.isArray(list) ? list.find(item => item?.id === id && item?.url) : null;
+
+    if (request.audioFormatId) audio = find(formats.audio, request.audioFormatId);
+    if (!audio?.url && formats.audio?.length) audio = formats.audio.find(item => item?.url) || formats.audio[0];
+    if (!audio?.url) audio = pickBestAudioFromPools(session, tabId);
+
+    if (video?.url && audio?.url) {
         return {
             mode: 'adaptive',
-            video: { url: capturedVideo.url, originalUrl: capturedVideo.originalUrl, contentLength: capturedVideo.contentLength },
-            audio: { url: cleanURL(capturedAudioUrl), originalUrl: capturedAudioUrl, contentLength: getStreamBytes(capturedAudioUrl) }
+            video,
+            audio: {
+                url: cleanURL(audio.originalUrl || audio.url),
+                originalUrl: audio.originalUrl || audio.url,
+                contentLength: Number(audio.contentLength) || getStreamBytes(audio.originalUrl || audio.url),
+                mime: audio.mime || '',
+                itag: audio.itag || ''
+            }
         };
+    }
+
+    // Last resort: any progressive stream for the requested height.
+    if (video?.url && !audio?.url) {
+        const wantHeight = Number(request?.qualityHeight || video.qualityHeight || video.height || 0);
+        const progressive = (formats.progressive || []).find(item =>
+            item?.url && (!wantHeight || Number(item.qualityHeight || item.height || 0) === wantHeight)
+        ) || (formats.progressive || []).find(item => item?.url);
+        if (progressive?.url) return { mode: 'single', media: progressive };
+
+        return { mode: 'adaptive', video, audio: null, missingAudio: true };
     }
     return null;
 }
@@ -145,11 +245,18 @@ async function startVideoDownload(tabId, request = {}) {
     if (contextError) return { success: false, error: contextError };
 
     // Formats come from quality probe + network capture only (no Drive playback API).
-    const selected = selectFormats(session, request);
+    // Pass tabId so we can also harvest in-memory recentStreams for audio/video.
+    const selected = selectFormats(session, request, tabId);
     if (!selected) {
         return {
             success: false,
-            error: 'No usable video/audio stream is ready. Let quality detection finish or play the video once as a fallback.'
+            error: 'No usable video stream was found for this quality. Re-run quality detection or play the video once, then try again.'
+        };
+    }
+    if (selected.missingAudio || (selected.mode === 'adaptive' && !selected.audio?.url)) {
+        return {
+            success: false,
+            error: 'Video stream is ready but no audio track was captured yet. Play the video for a few seconds, then try Download again.'
         };
     }
 

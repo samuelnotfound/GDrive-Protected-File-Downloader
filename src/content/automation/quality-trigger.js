@@ -348,17 +348,27 @@
     nudgePlayback: ({ seconds = 0.35 } = {}) => {
       enableMuteGuard();
       let nudged = false;
+      const step = Math.max(0.25, Number(seconds) || 0.35);
       for (const v of mediaElements('video')) {
         try {
           muteMedia(v);
           const duration = Number(v.duration);
           const current = Number(v.currentTime || 0);
           if (Number.isFinite(duration) && duration > 1) {
-            const next = Math.min(duration - 0.05, current + Math.max(0.15, Number(seconds) || 0.35));
-            if (next > current + 0.05) {
+            // Prefer jumping forward; if near the end, jump backward so a
+            // segment fetch is still forced for the new itag.
+            let next = current + step;
+            if (next >= duration - 0.1) {
+              next = Math.max(0, Math.min(current - step, duration - 0.5));
+            }
+            if (Math.abs(next - current) > 0.05) {
               v.currentTime = next;
               nudged = true;
             }
+          } else if (Number.isFinite(current)) {
+            // Unknown duration — still poke currentTime to trigger a fetch.
+            v.currentTime = current + step;
+            nudged = true;
           }
           if (v.paused) {
             const p = v.play();

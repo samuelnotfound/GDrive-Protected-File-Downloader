@@ -6,10 +6,29 @@ function cleanURL(url) {
 }
 
 
-const AUDIO_ITAG_PATTERN = /^(139|140|141|249|250|251)$/;
+// Adaptive audio-only itags (AAC + Opus). Drive/YouTube occasionally use
+// adjacent itags; keep the list wide so mime-less URLs still classify correctly.
+const AUDIO_ITAG_PATTERN = /^(139|140|141|249|250|251|256|258|327|328|599|600)$/;
+
+// Muxed (progressive) itags carry video+audio in one file — no separate audio track.
+const MUXED_ITAG_PATTERN = /^(18|22|34|35|37|38|43|44|45|46|59|78|82|83|84|85)$/;
 
 function isAudioStream(stream) {
-    return /audio/i.test(String(stream?.mime || '')) || AUDIO_ITAG_PATTERN.test(String(stream?.itag || ''));
+    // Prefer explicit mime (decoded query or forced from URL string).
+    if (/audio/i.test(String(stream?.mime || ''))) return true;
+    // Simple-plugin style: raw URL still carries mime=audio…
+    if (/[?&]mime=audio/i.test(String(stream?.originalUrl || stream?.url || ''))) return true;
+    if (AUDIO_ITAG_PATTERN.test(String(stream?.itag || ''))) return true;
+    return false;
+}
+
+function isMuxedStream(stream) {
+    if (!stream?.url) return false;
+    if (isAudioStream(stream)) return false;
+    if (MUXED_ITAG_PATTERN.test(String(stream?.itag || ''))) return true;
+    // mime=video/mp4 without codecs split and with a progressive-looking itag already handled;
+    // also accept explicit progressive flag if present.
+    return !!stream.progressive;
 }
 
 const bySizeDesc = (a, b) => Number(b.contentLength || 0) - Number(a.contentLength || 0);

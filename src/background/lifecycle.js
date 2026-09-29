@@ -1,12 +1,9 @@
 
-/** Last known URL per tab — used to avoid wiping session on SPA "loading" noise. */
+/** Last known URL per tab — used to detect navigation / reload. */
 const TAB_URL_BY_ID = new Map();
 
 /**
  * Extract a Drive file id from a viewer URL when possible.
- * Examples:
- *   https://drive.google.com/file/d/FILE_ID/view
- *   https://drive.google.com/open?id=FILE_ID
  */
 function driveFileIdFromUrl(url) {
     const value = String(url || '');
@@ -36,43 +33,70 @@ function isDriveHost(url) {
 }
 
 /**
- * True when navigation should drop captured formats / stream state.
- * Same Drive file (including SPA reloads that only set status=loading) → keep.
+ * Clear ALL capture state for a tab: session formats, in-memory rings,
+ * global last audio/video, and quality picker snapshots.
+ * Called on page refresh and when leaving/changing the Drive file.
  */
-function shouldClearSessionForNavigation(previousUrl, nextUrl) {
+async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {}) {
+    try { await clearStoredSession(tabId); } catch (_) {}
+    try { clearStreamCaptureState(tabId); } catch (_) {}
+    try { QUALITY_SCAN_RUNNING.delete(String(tabId)); } catch (_) {}
+
+    if (clearGlobal) {
+        try {
+            if (typeof clearGlobalStreams === 'function') clearGlobalStreams();
+            else await chrome.storage.local.remove(['psdGlobalStreams']);
+        } catch (_) {}
+    }
+
+    // Wipe picker snapshots for this file (and all, if file unknown).
+    try {
+        for (const area of [chrome.storage.session, chrome.storage.local]) {
+            const data = await area.get('psdQualityPickerSnapshots');
+            const snapshots = data?.psdQualityPickerSnapshots;
+            if (!snapshots || typeof snapshots !== 'object') continue;
+            if (fileId && snapshots[fileId]) {
+                delete snapshots[fileId];
+                await area.set({ psdQualityPickerSnapshots: snapshots });
+            } else if (!fileId) {
+                await area.remove('psdQualityPickerSnapshots');
+            }
+        }
+    } catch (_) {}
+
+    try { setBadge(''); } catch (_) {}
+}
+
+/**
+ * True when navigation should drop captured formats / stream state.
+ * Page refresh of the same file MUST clear — signed URLs expire and must be re-captured.
+ */
+function shouldClearSessionForNavigation(previousUrl, nextUrl, { isReload = false } = {}) {
+    if (isReload) return true;
     if (!nextUrl) return false;
 
-    // Left Drive entirely.
     if (previousUrl && isDriveHost(previousUrl) && !isDriveHost(nextUrl)) return true;
 
     const prevId = driveFileIdFromUrl(previousUrl);
     const nextId = driveFileIdFromUrl(nextUrl);
 
-    // Different Drive files.
     if (prevId && nextId && prevId !== nextId) return true;
-
-    // Was on a specific file, now on Drive without that file id (e.g. folder list).
     if (prevId && isDriveHost(nextUrl) && !nextId) return true;
 
-    // First URL we see for this tab on a non-matching path — only clear if we
-    // already had session-worthy state implied by a previous file id.
+    // Same file URL after a full document load counts as a refresh.
+    if (previousUrl && nextUrl && previousUrl.split('#')[0] === nextUrl.split('#')[0] && isDriveHost(nextUrl)) {
+        return true;
+    }
+
     return false;
 }
 
-function clearTabMediaState(tabId) {
-    clearStoredSession(tabId).catch(() => {});
-    clearStreamCaptureState(tabId);
-    setBadge('');
-}
-
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    // Prefer explicit URL changes; also note status=loading with tab.url for SPA noise checks.
     const nextUrl = String(changeInfo?.url || tab?.url || '').trim();
     if (!nextUrl) return;
 
     const previousUrl = TAB_URL_BY_ID.get(tabId) || '';
 
-    // Always remember the latest URL for this tab.
     if (changeInfo?.url) {
         TAB_URL_BY_ID.set(tabId, nextUrl);
     } else if (!previousUrl && tab?.url) {
@@ -80,26 +104,50 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
 
     const trackedUrl = TAB_URL_BY_ID.get(tabId) || nextUrl;
+    const fileId = driveFileIdFromUrl(trackedUrl);
 
-    // Only clear when the navigation meaningfully changes the Drive file context.
-    // Ignore pure status=loading events that keep the same file id (Drive SPA).
     if (changeInfo?.url) {
         if (shouldClearSessionForNavigation(previousUrl, changeInfo.url)) {
-            clearTabMediaState(tabId);
+            clearTabMediaState(tabId, { clearGlobal: true, fileId });
         }
         return;
     }
 
-    // status-only updates: clear only if the tab URL we know already implies a file change
-    // (e.g. we missed a url event). Same file → no-op.
-    if (changeInfo?.status === 'loading') {
-        if (previousUrl && shouldClearSessionForNavigation(previousUrl, trackedUrl)) {
-            clearTabMediaState(tabId);
-        }
+    // Full document load of a Drive page → treat as fresh session (no cached streams).
+    if (changeInfo?.status === 'loading' && isDriveHost(trackedUrl)) {
+        clearTabMediaState(tabId, { clearGlobal: true, fileId });
     }
 });
 
+// Explicit reload / typed navigation via webNavigation (more reliable than tabs.onUpdated).
+try {
+    chrome.webNavigation.onCommitted.addListener(details => {
+        if (details.frameId !== 0) return;
+        const tabId = Number(details.tabId);
+        if (!Number.isInteger(tabId) || tabId < 0) return;
+
+        const url = String(details.url || '');
+        const isReload =
+            details.transitionType === 'reload' ||
+            (Array.isArray(details.transitionQualifiers) &&
+                details.transitionQualifiers.includes('client_redirect') === false &&
+                details.transitionType === 'reload');
+
+        const previousUrl = TAB_URL_BY_ID.get(tabId) || '';
+        TAB_URL_BY_ID.set(tabId, url);
+
+        if (!isDriveHost(url) && !(previousUrl && isDriveHost(previousUrl))) return;
+
+        if (isReload || shouldClearSessionForNavigation(previousUrl, url, { isReload })) {
+            clearTabMediaState(tabId, {
+                clearGlobal: true,
+                fileId: driveFileIdFromUrl(url) || driveFileIdFromUrl(previousUrl)
+            });
+        }
+    });
+} catch (_) {}
+
 chrome.tabs.onRemoved.addListener(tabId => {
     TAB_URL_BY_ID.delete(tabId);
-    clearTabMediaState(tabId);
+    clearTabMediaState(tabId, { clearGlobal: true });
 });

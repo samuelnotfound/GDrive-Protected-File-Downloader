@@ -221,7 +221,6 @@
             if (option && !option.disabled) {
                 const select = root.querySelector('#psd-video-quality-video');
                 const labelEl = root.querySelector('.psd-quality-trigger-label');
-                const download = root.querySelector('#psd-video-quality-download');
                 const value = option.dataset.value || '';
                 if (select) select.value = value;
                 if (labelEl) labelEl.textContent = option.textContent || value;
@@ -234,9 +233,8 @@
                     node.setAttribute('aria-selected', node === option ? 'true' : 'false');
                 });
                 setQualityDropdownOpen(root, false);
-                // Do NOT call updatePickerState() here — rebuilding the list resets
-                // selection and can mark multiple rows selected when format ids collide.
-                if (download) download.disabled = !value;
+                // Same enable rules as updatePickerState — never enable on value alone.
+                updateDownloadEnabled(root);
             }
         };
 
@@ -712,39 +710,147 @@
         });
     }
 
-    function updatePickerState() {
-        const root = ensureQualityPicker();
-        const videoSelect = root.querySelector('#psd-video-quality-video');
-        const download = root.querySelector('#psd-video-quality-download');
-        const status = root.querySelector('#psd-video-quality-status');
+    function resolvedFormatLists() {
+        const live = video.formats || {};
+        const pf = (video.operation === 'picker' && video.pickerFormats)
+            ? video.pickerFormats
+            : (video.formats || {});
+        // Union video/audio from both sources (scan snapshot + live webRequest updates).
+        const byUrl = (list) => {
+            const map = new Map();
+            for (const item of (list || [])) {
+                if (!item?.url) continue;
+                map.set(String(item.url), item);
+            }
+            return [...map.values()];
+        };
+        return {
+            video: byUrl([...(pf.video || []), ...(live.video || [])]),
+            audio: byUrl([...(pf.audio || []), ...(live.audio || [])]),
+            progressive: byUrl([...(pf.progressive || []), ...(live.progressive || [])])
+        };
+    }
 
-        const pickerFormats =
-            video.operation === 'picker' && video.pickerFormats
-                ? video.pickerFormats
-                : video.formats;
+    function updateDownloadEnabled(root) {
+        const el = root || document.getElementById('psd-video-quality-picker');
+        if (!el) return false;
+        const videoSelect = el.querySelector('#psd-video-quality-video');
+        const download = el.querySelector('#psd-video-quality-download');
+        const status = el.querySelector('#psd-video-quality-status');
+        if (!videoSelect || !download) return false;
 
-        const hasProgressive = Array.isArray(pickerFormats?.progressive) && pickerFormats.progressive.length;
-        const hasAdaptiveVideo = Array.isArray(pickerFormats?.video) && pickerFormats.video.length;
-        const hasAudio = Array.isArray(pickerFormats?.audio) && pickerFormats.audio.some(item => item?.url);
+        const { video: videoList, audio: audioList, progressive: progressiveList } = resolvedFormatLists();
+        const hasProgressive = progressiveList.some(item => item?.url);
+        const hasAdaptiveVideo = videoList.some(item => item?.url);
+        const hasAudio = audioList.some(item => item?.url);
+        const hasSelection = !!(videoSelect.value || video.lastSelectedHeight);
 
-        const formatsForSelect = !hasAdaptiveVideo && hasProgressive
-            ? pickerFormats.progressive
-            : pickerFormats?.video;
-        const emptyText = !hasAdaptiveVideo && hasProgressive
-            ? 'No video format detected'
-            : 'No adaptive video format detected';
-
-        populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect, video.qualityMenuOptions), formatVideoLabel, emptyText);
-
-        const valid = !!(videoSelect.value && (hasProgressive || (hasAdaptiveVideo && hasAudio)));
+        // Progressive is self-contained. Adaptive needs the single shared audio track.
+        const valid = !!(hasSelection && (hasProgressive || (hasAdaptiveVideo && hasAudio)));
         const downloadBusy =
             video.operation === 'staging' ||
             !!videoOverlay.getJobId?.();
         download.disabled = !valid || downloadBusy;
-        if (downloadBusy) {
-            status.textContent = 'Download in progress…';
-        } else {
-            status.textContent = valid ? '' : 'Waiting for a usable Drive stream…';
+
+        if (status) {
+            if (downloadBusy) status.textContent = 'Download in progress…';
+            else if (valid) status.textContent = '';
+            else if (hasAdaptiveVideo && !hasAudio && !hasProgressive) {
+                status.textContent = 'Waiting for audio track…';
+            } else if (!hasSelection) {
+                status.textContent = 'Select a quality to download.';
+            } else {
+                status.textContent = 'Waiting for a usable Drive stream…';
+            }
+        }
+        return valid;
+    }
+
+    let audioHydrateInFlight = false;
+    async function hydrateSharedAudioFromSession() {
+        if (audioHydrateInFlight || video.operation !== 'picker') return;
+        const lists = resolvedFormatLists();
+        if (lists.audio.some(a => a?.url)) {
+            updateDownloadEnabled();
+            return;
+        }
+        audioHydrateInFlight = true;
+        try {
+            const response = await core.sendRuntime({ action: 'getStreams' });
+            const session = response?.streams;
+            const globalAudio = response?.globalAudio;
+
+            const audioEntries = [];
+            if (session?.audio) {
+                audioEntries.push({
+                    url: session.audio,
+                    originalUrl: session.audioOriginal || session.audio,
+                    mime: 'audio/mp4'
+                });
+            }
+            for (const a of (session?.audioCandidates || [])) {
+                if (a?.url) audioEntries.push(a);
+            }
+            for (const a of (session?.formats?.audio || [])) {
+                if (a?.url) audioEntries.push(a);
+            }
+            if (globalAudio?.url) audioEntries.push(globalAudio);
+            if (!audioEntries.length) return;
+
+            const shared = audioEntries[0];
+            video.formats = video.formats || { video: [], audio: [], progressive: [] };
+            video.formats.audio = [shared];
+            if (video.pickerFormats) {
+                video.pickerFormats = {
+                    ...video.pickerFormats,
+                    audio: [shared]
+                };
+            }
+            updateDownloadEnabled();
+        } catch (_) {
+        } finally {
+            audioHydrateInFlight = false;
+        }
+    }
+
+    function updatePickerState() {
+        const root = ensureQualityPicker();
+        const videoSelect = root.querySelector('#psd-video-quality-video');
+
+        const { video: videoList, audio: audioList, progressive: progressiveList } = resolvedFormatLists();
+        const hasAdaptiveVideo = videoList.some(item => item?.url);
+        const hasProgressive = progressiveList.some(item => item?.url);
+
+        const formatsForSelect = hasAdaptiveVideo
+            ? videoList
+            : (hasProgressive ? progressiveList : videoList);
+        const emptyText = hasProgressive && !hasAdaptiveVideo
+            ? 'No video format detected'
+            : 'No adaptive video format detected';
+
+        populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect, video.qualityMenuOptions), formatVideoLabel, emptyText);
+        updateDownloadEnabled(root);
+
+        // If UI has video but no audio yet, pull global/session audio (retry while open).
+        if (hasAdaptiveVideo && !audioList.some(a => a?.url) && !hasProgressive) {
+            void hydrateSharedAudioFromSession();
+            if (!window.__PSD_AUDIO_HYDRATE_TIMER) {
+                window.__PSD_AUDIO_HYDRATE_TIMER = setInterval(() => {
+                    if (video.operation !== 'picker') {
+                        clearInterval(window.__PSD_AUDIO_HYDRATE_TIMER);
+                        window.__PSD_AUDIO_HYDRATE_TIMER = null;
+                        return;
+                    }
+                    const lists = resolvedFormatLists();
+                    if (lists.audio.some(a => a?.url)) {
+                        clearInterval(window.__PSD_AUDIO_HYDRATE_TIMER);
+                        window.__PSD_AUDIO_HYDRATE_TIMER = null;
+                        updateDownloadEnabled();
+                        return;
+                    }
+                    void hydrateSharedAudioFromSession();
+                }, 1000);
+            }
         }
 
         const mountedItem = root.closest?.('#' + VIDEO_MENU_ID);
@@ -800,18 +906,20 @@
     }
 
     async function mountPickerAfterScan() {
-        await waitForDriveFileMenuClosed(700);
+        // Longer budgets: a multi-second quality scan can leave Drive's File menu
+        // in a transitional state; rushing the reopen is the main silent-fail path.
+        await waitForDriveFileMenuClosed(1200);
         const menu = await reopenDriveFileMenu();
         if (!menu) throw new Error('Drive File menu did not reopen after quality detection.');
 
         const ready = await waitUntil(async () => {
-            const mounted = await ensureQualityPickerMounted({ reopenIfMissing: false });
+            const mounted = await ensureQualityPickerMounted({ reopenIfMissing: true });
             if (!mounted) return false;
             updatePickerState();
 
             const liveRoot = document.getElementById('psd-video-quality-picker');
             return !!(liveRoot?.querySelector('#psd-video-quality-video')?.value);
-        }, 700, 25);
+        }, 1500, 40);
 
         if (!ready) throw new Error('Quality picker could not be mounted into the reopened File menu.');
         document.querySelectorAll('#' + VIDEO_MENU_ID).forEach(app.video?.normalizeQualityMenuItem);
@@ -827,6 +935,8 @@
         const status = root.querySelector('#psd-video-quality-status');
         root.style.display = 'none';
         video.operation = 'picker';
+        // Always keep restore-on-open so a successful scan is never discarded
+        // just because the immediate mount dance timed out.
         video.restorePickerOnFileMenuOpen = true;
         hidePageBlocker();
         updatePickerState();
@@ -836,11 +946,25 @@
         try {
             await mountPickerAfterScan();
             return true;
-        } catch (_) {
-            video.operation = 'idle';
+        } catch (err) {
+            // Scan data is already saved — keep operation as 'picker' and
+            // restorePickerOnFileMenuOpen so the next File-menu open shows it.
+            // Only fall back to idle if we have nothing to show.
+            const hasFormats = !!(
+                (video.pickerFormats?.video || []).length ||
+                (video.pickerFormats?.progressive || []).length ||
+                (formats?.video || []).length
+            );
+            if (!hasFormats) {
+                video.operation = 'idle';
+                video.restorePickerOnFileMenuOpen = false;
+            } else if (status) {
+                status.textContent = message
+                    || 'Qualities detected. Open the File menu to choose a quality.';
+            }
             hidePageBlocker();
             app.video?.updateMenuState();
-            return false;
+            return hasFormats;
         }
     }
 

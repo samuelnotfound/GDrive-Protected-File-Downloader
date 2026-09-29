@@ -175,6 +175,26 @@ async function handlePageStreamDetected({ request, tabId }) {
     if (!url || !url.includes('/videoplayback')) return { success: false, error: 'Not a Drive playback URL.' };
 
     const parsed = parseStreamCandidate(url, url);
+    if (!parsed) return { success: false, error: 'Could not parse Drive playback URL.' };
+
+    // Tag into the in-memory probe buffer FIRST (same as webRequest path).
+    // waitForQualityStream polls memory; waiting on the storage queue was the
+    // main reason quality-click streams were missed during automated scans.
+    const state = streamCaptureState(tabId);
+    const activeProbe = state.activeProbe;
+    const candidate = {
+        ...parsed,
+        pageBridgeId: String(request.pageBridgeId || ''),
+        frameUrl: String(request.frameUrl || ''),
+        source: String(request.source || 'page-bridge'),
+        capturedAt: Date.now()
+    };
+    if (activeProbe && Number(candidate.capturedAt) >= Number(activeProbe.startedAt || 0)) {
+        tagCandidateWithProbe(candidate, activeProbe);
+        addToProbeBuffer(state, candidate);
+    }
+    pushRecentStream(tabId, candidate);
+
     const session = await getStoredSession(tabId);
     const fileId = String(request.fileId || session?.fileId || '').trim();
     const viewerSessionId = String(request.viewerSessionId || session?.viewerSessionId || '').trim();
@@ -183,13 +203,7 @@ async function handlePageStreamDetected({ request, tabId }) {
     const rejection = validatePageStream({ session, fileId, viewerSessionId, pageBridgeId, candidate: parsed });
     if (rejection) return rejection;
 
-    const candidate = {
-        ...parsed,
-        pageBridgeId: pageBridgeId || session.pageBridgeId || '',
-        frameUrl: String(request.frameUrl || ''),
-        source: String(request.source || 'page-bridge'),
-        capturedAt: Date.now()
-    };
+    candidate.pageBridgeId = pageBridgeId || session.pageBridgeId || '';
 
     let latest = null;
     await queueSessionMutation(tabId, current => {
@@ -199,12 +213,25 @@ async function handlePageStreamDetected({ request, tabId }) {
 
         const probe = current.activeQualityProbe;
         if (probe) {
-            candidate.probeQuality = probe.label || '';
-            candidate.probeToken = probe.token || '';
+            candidate.probeQuality = probe.label || candidate.probeQuality || '';
+            candidate.probeToken = probe.token || candidate.probeToken || '';
+            const labelHeight = Number(String(probe.label || '').match(/(\d{3,4})p/i)?.[1] || 0);
+            if (labelHeight && !isAudioStream(candidate)) {
+                candidate.qualityHeight = labelHeight;
+                candidate.probeHeight = labelHeight;
+            }
             current.probeCandidates = [candidate, ...(Array.isArray(current.probeCandidates) ? current.probeCandidates : [])].slice(0, 32);
         }
 
-        addCapturedStreamToSession(current, candidate, hasAudioMime(candidate));
+        // Simple-plugin classification: mime=audio in URL, else itag/isAudioStream.
+        const rawUrl = String(candidate.originalUrl || candidate.url || '');
+        const isAudio = rawUrl.includes('mime=audio') || isAudioStream(candidate);
+        if (isAudio && typeof saveGlobalStream === 'function') {
+            saveGlobalStream('audio', candidate, rawUrl);
+        } else if (!isAudio && typeof saveGlobalStream === 'function') {
+            saveGlobalStream('video', candidate, rawUrl);
+        }
+        addCapturedStreamToSession(current, candidate, isAudio);
         current.playbackStarted = true;
         current.streamCaptureEnabled = true;
         latest = current;
@@ -228,14 +255,40 @@ async function handlePageStreamDetected({ request, tabId }) {
 async function storeScannedFormats(tabId, fileId, formats) {
     await queueSessionMutation(tabId, current => {
         if (!current || current.fileId !== fileId) return false;
-        current.formats = formats;
+
+        // Merge — never wipe audio/video candidates the network path already stored.
+        // Scan result is preferred order, then prior session candidates, then prior formats.
+        const mergedVideo = mergeFormatLists(
+            formats?.video || [],
+            [...(current.videoCandidates || []), ...(current.formats?.video || [])],
+            byHeightWidthThenSize,
+            48
+        );
+        const mergedAudio = dedupeAudioFormats(mergeFormatLists(
+            formats?.audio || [],
+            [...(current.audioCandidates || []), ...(current.formats?.audio || [])],
+            bySizeDesc,
+            24
+        ));
+        const mergedProgressive = mergeFormatLists(
+            formats?.progressive || [],
+            current.formats?.progressive || [],
+            byHeightWidthThenSize,
+            24
+        );
+
+        current.formats = {
+            video: mergedVideo,
+            audio: mergedAudio,
+            progressive: mergedProgressive
+        };
         current.formatsFetchedAt = Date.now();
-        current.videoCandidates = Array.isArray(formats.video) ? formats.video.slice() : [];
-        current.audioCandidates = Array.isArray(formats.audio) ? formats.audio.slice() : [];
-        current.video = formats.video?.[0]?.url || null;
-        current.audio = formats.audio?.[0]?.url || null;
-        current.videoOriginal = formats.video?.[0]?.originalUrl || current.video;
-        current.audioOriginal = formats.audio?.[0]?.originalUrl || current.audio;
+        current.videoCandidates = mergedVideo.slice();
+        current.audioCandidates = mergedAudio.slice();
+        current.video = mergedVideo[0]?.url || current.video || null;
+        current.audio = mergedAudio[0]?.url || current.audio || null;
+        current.videoOriginal = mergedVideo[0]?.originalUrl || current.videoOriginal || current.video;
+        current.audioOriginal = mergedAudio[0]?.originalUrl || current.audioOriginal || current.audio;
         current.streamCaptureEnabled = true;
         return current;
     });
@@ -307,10 +360,52 @@ async function performQualityScan(tabId, fileId) {
             menuScopedVideo = rawVideo.map(normalizeHeight).filter(Boolean);
         }
 
+        // One shared audio track for the file (not per quality).
+        const state = streamCaptureState(tabId);
+        const priorSession = await getStoredSession(tabId);
+        const recentAudio = (state?.recentStreams || [])
+            .filter(isAudioStream)
+            .filter(s => s?.url);
+        const audioPool = [
+            ...(Array.isArray(result.formats?.audio) ? result.formats.audio : []),
+            ...recentAudio,
+            ...(Array.isArray(priorSession?.audioCandidates) ? priorSession.audioCandidates : []),
+            ...(Array.isArray(priorSession?.formats?.audio) ? priorSession.formats.audio : [])
+        ];
+        if (priorSession?.audio) {
+            audioPool.unshift({
+                url: priorSession.audio,
+                originalUrl: priorSession.audioOriginal || priorSession.audio,
+                mime: 'audio/mp4'
+            });
+        }
+        const sharedAudioList = dedupeAudioFormats(mergeFormatLists([], audioPool, bySizeDesc));
+        const sharedAudio = sharedAudioList.length ? [sharedAudioList[0]] : [];
+
+        // Split muxed (progressive) streams out of the adaptive video list.
+        const progressive = [];
+        const adaptiveVideo = [];
+        for (const stream of mergeFormatLists([], menuScopedVideo, byHeightWidthThenSize)) {
+            if (!stream?.url) continue;
+            if (isMuxedStream(stream)) {
+                progressive.push({ ...stream, progressive: true });
+            } else {
+                adaptiveVideo.push(stream);
+            }
+        }
+        // Also promote muxed streams from the recent ring / prior session.
+        for (const stream of [
+            ...(state?.recentStreams || []),
+            ...(Array.isArray(priorSession?.videoCandidates) ? priorSession.videoCandidates : [])
+        ]) {
+            if (!stream?.url || isAudioStream(stream) || !isMuxedStream(stream)) continue;
+            progressive.push({ ...stream, progressive: true });
+        }
+
         const scannedFormats = {
-            video: mergeFormatLists([], menuScopedVideo, byHeightWidthThenSize),
-            audio: dedupeAudioFormats(mergeFormatLists([], result.formats?.audio, bySizeDesc)),
-            progressive: []
+            video: adaptiveVideo,
+            audio: sharedAudio,
+            progressive: mergeFormatLists([], progressive, byHeightWidthThenSize, 24)
         };
         // Persist first, but ALWAYS return/send the in-memory scannedFormats.
         // Re-reading the session can race with concurrent stream updates and
@@ -362,7 +457,61 @@ async function handleAutomatedQualityScan({ request, tabId }) {
 }
 
 
-const handleGetStreams = async ({ tabId }) => ({ streams: await getStoredSession(tabId) });
+
+async function handleClearTabCaptureState({ tabId }) {
+    if (!Number.isInteger(tabId) || tabId < 0) return { success: false };
+    try {
+        if (typeof clearTabMediaState === 'function') {
+            await clearTabMediaState(tabId, { clearGlobal: true });
+        } else {
+            await clearStoredSession(tabId);
+            clearStreamCaptureState(tabId);
+            try {
+                if (typeof GLOBAL_LAST_AUDIO !== 'undefined') GLOBAL_LAST_AUDIO = null;
+                if (typeof GLOBAL_LAST_VIDEO !== 'undefined') GLOBAL_LAST_VIDEO = null;
+            } catch (_) {}
+            try { await chrome.storage.local.remove(['psdGlobalStreams']); } catch (_) {}
+        }
+    } catch (_) {}
+    return { success: true };
+}
+
+const handleGetStreams = async ({ tabId }) => {
+    // Always reload durable global streams (simple-plugin style).
+    if (typeof loadGlobalStreamsFromStorage === 'function') {
+        await loadGlobalStreamsFromStorage();
+    }
+    let session = await getStoredSession(tabId);
+    let globalAudio = typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null;
+    let globalVideo = typeof getGlobalLastVideo === 'function' ? getGlobalLastVideo() : null;
+
+    // Attach global audio onto the session if still missing.
+    if (session && !session.audio && globalAudio?.url) {
+        await queueSessionMutation(tabId, current => {
+            if (!current) return false;
+            current.audio = globalAudio.url;
+            current.audioOriginal = globalAudio.originalUrl || globalAudio.url;
+            current.audioCandidates = addUniqueCandidate(
+                Array.isArray(current.audioCandidates) ? current.audioCandidates : [],
+                globalAudio,
+                8
+            );
+            current.formats = current.formats || { video: [], audio: [], progressive: [] };
+            current.formats.audio = [{ ...globalAudio, id: `audio:global:${globalAudio.itag || ''}` }];
+            return current;
+        });
+        session = await getStoredSession(tabId);
+    }
+    return {
+        streams: session,
+        globalAudio: globalAudio || session?.formats?.audio?.[0] || (session?.audio ? {
+            url: session.audio,
+            originalUrl: session.audioOriginal || session.audio,
+            mime: 'audio/mp4'
+        } : null),
+        globalVideo: globalVideo || null
+    };
+};
 
 async function handleMuteMediaNow({ tabId }) {
     if (!Number.isInteger(tabId)) return { success: false, error: 'No active Drive tab.' };
@@ -427,6 +576,7 @@ const ACTION_HANDLERS = Object.freeze({
     videoPlaybackIntent: requireDriveTab(handleVideoPlaybackIntent, () => ({ success: false })),
     videoPlaybackStarted: requireDriveTab(handleVideoPlaybackStarted, () => ({ success: false })),
     automatedQualityScan: requireDriveTab(handleAutomatedQualityScan),
+    clearTabCaptureState: requireDriveTab(handleClearTabCaptureState),
     getStreams: handleGetStreams,
     muteMediaNow: handleMuteMediaNow,
     downloadVideo: handleDownloadVideo

@@ -325,6 +325,27 @@
         }, true);
     }
 
+    
+    // Fresh page load: drop any in-memory formats and ask background to wipe
+    // cached streams for this tab so we never reuse URLs from a previous load.
+    (function clearCaptureStateOnPageLoad() {
+        if (window.__PSD_CLEAR_ON_LOAD) return;
+        window.__PSD_CLEAR_ON_LOAD = true;
+        try {
+            video.formats = core.cloneFormats({});
+            video.pickerFormats = null;
+            video.scanCache = null;
+            video.restorePickerOnFileMenuOpen = false;
+            video.qualityMenuOptions = [];
+            video.playbackStarted = false;
+        } catch (_) {}
+        try {
+            chrome.runtime.sendMessage({ action: 'clearTabCaptureState' }, () => {
+                void chrome.runtime.lastError;
+            });
+        } catch (_) {}
+    })();
+
     function installStreamStorageListener() {
         if (window.__PSD_STREAM_STORAGE_LISTENER) return;
         window.__PSD_STREAM_STORAGE_LISTENER = true;
@@ -425,8 +446,26 @@
                     }))
                     .filter(option => option.height > 0);
             }
+            if (video.operation === 'picker' || video.pickerFormats) {
+                video.pickerFormats = core.cloneFormats(video.formats);
+            }
         } else if (message.formats) {
-            video.formats = message.formats;
+            // Merge so a video-only update never wipes already-captured audio.
+            const incoming = message.formats || {};
+            const base = video.formats || { video: [], audio: [], progressive: [] };
+            video.formats = {
+                video: (incoming.video?.length ? incoming.video : base.video) || [],
+                audio: (incoming.audio?.length ? incoming.audio : base.audio) || [],
+                progressive: (incoming.progressive?.length ? incoming.progressive : base.progressive) || []
+            };
+            if (video.operation === 'picker' || video.pickerFormats) {
+                const pf = video.pickerFormats || { video: [], audio: [], progressive: [] };
+                video.pickerFormats = {
+                    video: (incoming.video?.length ? incoming.video : pf.video) || [],
+                    audio: (incoming.audio?.length ? incoming.audio : pf.audio) || [],
+                    progressive: (incoming.progressive?.length ? incoming.progressive : pf.progressive) || []
+                };
+            }
         }
 
         if (message.type === 'videoStreamDetected') video.playbackStarted = true;
