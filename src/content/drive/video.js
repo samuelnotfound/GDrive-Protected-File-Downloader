@@ -21,7 +21,6 @@
         'videoStageMergeProgress', 'videoStageDownloadStarted', 'videoStageFinished',
         'videoStageError', 'videoStageCancelled'
     ]);
-    const SCAN_VEIL_TEXT = 'Checking video quality';
 
     function normalizeQualityMenuItem(item) {
         if (!item) return;
@@ -53,9 +52,24 @@
     function updateVideoMenuState() {
         const hasFormats = (video.formats?.video?.length || video.formats?.progressive?.length) > 0;
         const downloadBusy = video.operation === 'staging' || !!videoOverlay.getJobId?.();
-        const labelText = downloadBusy
-            ? 'Downloading…'
-            : (video.operation === 'picker' ? 'Choose video quality' : 'Download');
+        const ready = isPlaybackReadyForDownload();
+        // Picker/scanning stay interactive once opened; idle Download requires playback.
+        const blocked = downloadBusy
+            || video.operation === 'scanning'
+            || (video.operation === 'idle' && !ready);
+
+        let labelText = 'Download';
+        let infoText = 'GDrive Protected File Downloader';
+        if (downloadBusy) {
+            labelText = 'Downloading…';
+        } else if (video.operation === 'picker') {
+            labelText = 'Choose video quality';
+        } else if (video.operation === 'scanning') {
+            labelText = 'Reading qualities…';
+        } else if (!ready) {
+            labelText = 'Play video first';
+            infoText = 'Start the video, then Download unlocks';
+        }
 
         document.querySelectorAll('#' + VIDEO_MENU_ID).forEach(item => {
             normalizeQualityMenuItem(item);
@@ -64,17 +78,17 @@
             const label = item.querySelector('.psd-video-menu-label');
             const info = item.querySelector('.psd-video-menu-info');
             if (label) label.textContent = labelText;
-            if (info) info.textContent = 'GDrive Protected File Downloader';
+            if (info) info.textContent = infoText;
 
             item.setAttribute('aria-label', labelText);
             item.dataset.streamReady = hasFormats ? 'true' : 'false';
-            item.dataset.playbackReady = video.playbackStarted ? 'true' : 'false';
+            item.dataset.playbackReady = ready ? 'true' : 'false';
 
-            if (downloadBusy) {
+            if (blocked) {
                 item.setAttribute('aria-disabled', 'true');
                 item.setAttribute('disabled', 'true');
                 item.style.cursor = 'default';
-                item.style.opacity = '0.55';
+                item.style.opacity = '0.5';
                 item.style.pointerEvents = 'none';
                 item.tabIndex = -1;
             } else {
@@ -140,140 +154,122 @@
         addProtectedVideoMenuItem(menu);
     }
 
-    function cachedScanUsable() {
-        const cache = video.scanCache;
-        if (!cache || !video.fileId || cache.fileId !== video.fileId) return false;
 
-        const videos = [...(video.formats?.video || []), ...(video.formats?.progressive || [])];
-        const all = [...videos, ...(video.formats?.audio || [])].filter(format => format?.url);
-        if (!videos.length || !all.length) return false;
 
-        const heights = new Set(videos.map(format => Number(format.height) || 0).filter(Boolean));
-        if (heights.size < cache.heightCount) return false;
 
-        let soonestExpiry = Infinity;
-        for (const format of all) {
-            try {
-                const expires = Number(new URL(format.originalUrl || format.url).searchParams.get('expire') || 0);
-                if (expires) soonestExpiry = Math.min(soonestExpiry, expires);
-            } catch (_) {}
+
+
+
+
+    function isDriveVideoPlayingNow() {
+        try {
+            const videos = core.collectVideoElements?.() || [...document.querySelectorAll('video')];
+            for (const v of videos) {
+                try {
+                    if (!v || v.ended) continue;
+                    // Actively playing
+                    if (!v.paused && (v.currentTime > 0.05 || v.readyState >= 2)) return true;
+                    // Buffering after user hit play
+                    if (!v.paused && v.readyState >= 1) return true;
+                } catch (_) {}
+            }
+        } catch (_) {}
+        return false;
+    }
+
+    /** Download is allowed only when a real playback signal exists. */
+    function isPlaybackReadyForDownload() {
+        if (isDriveVideoPlayingNow()) return true;
+        // Network recently saw videoplayback for this tab (set by videoStreamDetected).
+        if (video.streamActivityAt && (Date.now() - Number(video.streamActivityAt)) < 120000) {
+            return true;
         }
-
-        return Number.isFinite(soonestExpiry)
-            ? soonestExpiry > Date.now() / 1000 + 120
-            : Date.now() - cache.at < 30 * 60 * 1000;
-    }
-
-    function rememberCompletedScan(scanReport) {
-        const formats = [...(video.formats?.video || []), ...(video.formats?.progressive || [])];
-        video.scanCache = {
-            fileId: video.fileId,
-            at: Date.now(),
-            heightCount: new Set(formats.map(format => Number(format.height) || 0).filter(Boolean)).size,
-            note: quality.describeScanReport(scanReport, '')
-        };
-    }
-
-    function toCapturedVideoFormat(item, index) {
-        return {
-            id: item.id || `captured-v-${index}`,
-            url: item.url,
-            originalUrl: item.originalUrl,
-            contentLength: Number(item.contentLength) || 0,
-            width: Number(item.width) || 0,
-            height: Number(item.height) || 0,
-            fps: Number(item.fps) || 0,
-            itag: item.itag || '',
-            kind: 'video',
-            mime: item.mime || 'video/mp4'
-        };
-    }
-
-    function toCapturedAudioFormat(item, index) {
-        return {
-            id: item.id || `captured-a-${index}`,
-            url: item.url,
-            originalUrl: item.originalUrl,
-            contentLength: Number(item.contentLength) || 0,
-            itag: item.itag || '',
-            kind: 'audio',
-            acodec: item.codecs || '',
-            mime: item.mime || 'audio/mp4'
-        };
-    }
-
-    async function captureExistingStreamsAndPick() {
-        const response = await core.sendRuntime({ action: 'getStreams' });
-        const streams = response?.streams || {};
-        const videoCandidates = Array.isArray(streams.videoCandidates) ? streams.videoCandidates : [];
-        const audioCandidates = Array.isArray(streams.audioCandidates) ? streams.audioCandidates : [];
-
-        const videoFormats = videoCandidates.map(toCapturedVideoFormat)
-            .sort((a, b) => (b.height - a.height) || (b.contentLength - a.contentLength));
-        const audioFormats = audioCandidates.map(toCapturedAudioFormat)
-            .sort((a, b) => b.contentLength - a.contentLength);
-
-        if (videoFormats.length || audioFormats.length) {
-            return {
-                success: true,
-                formats: { video: videoFormats, audio: audioFormats, progressive: [] }
-            };
-        }
-
-        return {
-            success: false,
-            error: 'No stream has been captured yet. Play the video once, let it load, then press Refresh.'
-        };
-    }
-
-    async function showDetectedQuality(response) {
-        const formats = response?.success ? response.formats : null;
-        if (!formats || (!formats.video?.length && !formats.progressive?.length)) return false;
-
-        const menuOptions =
-            response?.quality?.options ||
-            response?.qualityOptions ||
-            response?.observedQualityOptions ||
-            null;
-
-        await quality.show(
-            formats,
-            quality.describeScanReport(response.scanReport, ''),
-            menuOptions
-        );
-        rememberCompletedScan(response.scanReport);
-        return true;
-    }
-
-    async function showCapturedQualityFallback() {
-        const fallback = await captureExistingStreamsAndPick();
-        if (!fallback.success) return false;
-
-        await quality.show(
-            fallback.formats,
-            'Using the stream(s) currently playing in Drive.'
-        );
-        return true;
+        return false;
     }
 
     async function runQualityDetection() {
+        if (video.operation === 'scanning') return;
+
+        if (!isPlaybackReadyForDownload()) {
+            updateVideoMenuState();
+            return;
+        }
+
         video.operation = 'scanning';
         updateVideoMenuState();
-        quality.showPageBlocker(SCAN_VEIL_TEXT);
+        quality.showPageBlocker('Reading available qualities…');
 
         app.ui.closeDriveFileMenu();
-        await quality.waitForDriveFileMenuClosed(1200);
-        if (core.startDrivePlayerFromUserGesture()?.started) video.playbackStarted = true;
+        await quality.waitForDriveFileMenuClosed(1000);
 
         try {
             const context = await core.syncViewerContext(true);
-            if (!context?.fileId) throw new Error('Could not identify the current Drive video before starting quality detection.');
+            if (!context?.fileId) throw new Error('Could not identify the current Drive video.');
 
-            await core.sendRuntime({ action: 'prepareQualityScan', fileId: video.fileId });
-            const response = await core.sendRuntime({ action: 'automatedQualityScan', fileId: video.fileId });
-            if (await showDetectedQuality(response)) return;
-            if (await showCapturedQualityFallback()) return;
+            let response = null;
+            // Two attempts — Settings/Quality menu is flaky right after closing File menu.
+            for (let attempt = 0; attempt < 2; attempt++) {
+                response = await core.sendRuntime({
+                    action: 'listPlayerQualityLabels',
+                    fileId: video.fileId
+                });
+                if (response?.success && (response.options?.length || response.formats?.video?.length)) break;
+                await new Promise(r => setTimeout(r, 600));
+            }
+
+            const options = Array.isArray(response?.options) ? response.options : [];
+            if (response?.success && options.length) {
+                const formats = {
+                    video: options.map(o => ({
+                        id: `label:${o.height}`,
+                        height: Number(o.height) || 0,
+                        qualityHeight: Number(o.height) || 0,
+                        probeQuality: o.label || `${o.height}p`,
+                        menuLabel: o.label || `${o.height}p`,
+                        labelOnly: true,
+                        url: ''
+                    })),
+                    audio: [],
+                    progressive: []
+                };
+                video.qualityMenuOptions = options;
+                video.pickerFormats = formats;
+                video.scanCache = {
+                    fileId: video.fileId,
+                    at: Date.now(),
+                    heightCount: options.length,
+                    note: `Found ${options.length} quality option(s). Select one, then Download.`,
+                    menuOptions: options.slice()
+                };
+                await quality.show(
+                    formats,
+                    `Found ${options.length} quality option(s). Select one, then Download.`,
+                    options
+                );
+                return;
+            }
+
+            // Label scan failed — do NOT pretend current stream is a full quality list.
+            // Show a clear error so the user retries while the player is open.
+            video.operation = 'picker';
+            updateVideoMenuState();
+            await quality.show(
+                { video: [], audio: [], progressive: [] },
+                response?.error
+                    || 'Could not read quality options from the player. Keep the video playing and try Download again.',
+                []
+            );
+            return;
         } catch (error) {
+            try {
+                video.operation = 'picker';
+                await quality.show(
+                    { video: [], audio: [], progressive: [] },
+                    error?.message || 'Quality detection failed. Try again while the video is playing.',
+                    []
+                );
+                return;
+            } catch (_) {}
         }
 
         quality.resetScanUI();
@@ -281,22 +277,105 @@
 
     async function startVideoFromMenu() {
         core.muteMediaImmediately();
-        // Block while a download job is active.
-        if (video.operation === 'staging' || videoOverlay.getJobId?.()) return;
+        if (video.operation === 'staging' || video.operation === 'scanning' || videoOverlay.getJobId?.()) return;
         if (video.operation !== 'idle') return;
 
-        if (cachedScanUsable() || core.hasUsableFormats(video.pickerFormats)) {
+        // Hard gate: Download only runs after real playback / stream activity.
+        if (!isPlaybackReadyForDownload()) {
+            updateVideoMenuState();
+            return;
+        }
+        video.playbackStarted = true;
+
+        // Only skip the label scan if we already listed player quality rows this session.
+        // Having a current stream URL alone is NOT enough — that is the bug that
+        // skipped probing and only offered the playing quality.
+        const menuOpts = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
+        if (menuOpts.length > 0) {
             app.ui.closeDriveFileMenu();
             video.operation = 'picker';
+            const formats = video.pickerFormats || {
+                video: menuOpts.map(o => ({
+                    id: `label:${o.height}`,
+                    height: o.height,
+                    qualityHeight: o.height,
+                    probeQuality: o.label || o.text || `${o.height}p`,
+                    menuLabel: o.label || o.text || `${o.height}p`,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: (video.formats?.audio || []).slice(0, 1),
+                progressive: []
+            };
             await quality.show(
-                video.pickerFormats || video.formats,
-                video.scanCache?.note || '',
-                video.scanCache?.menuOptions || video.qualityMenuOptions || null
+                formats,
+                video.scanCache?.note || `Found ${menuOpts.length} quality option(s). Select one, then Download.`,
+                menuOpts
             );
             return;
         }
 
+        // Always list ARIA quality labels from the player (Settings → Quality → scan).
         await runQualityDetection();
+    }
+
+    function installPlaybackUnlockWatch() {
+        if (window.__PSD_PLAYBACK_UNLOCK_WATCH) return;
+        window.__PSD_PLAYBACK_UNLOCK_WATCH = true;
+
+        const markPlaying = () => {
+            video.playbackStarted = true;
+            video.streamActivityAt = Date.now();
+            updateVideoMenuState();
+        };
+
+        const attachToVideos = () => {
+            const videos = core.collectVideoElements?.() || [...document.querySelectorAll('video')];
+            for (const v of videos) {
+                if (v.__psdPlayWatch) continue;
+                v.__psdPlayWatch = true;
+                for (const ev of ['play', 'playing', 'timeupdate', 'loadeddata']) {
+                    v.addEventListener(ev, () => {
+                        try {
+                            if (!v.paused && !v.ended) markPlaying();
+                        } catch (_) {}
+                    }, { passive: true });
+                }
+            }
+        };
+
+        attachToVideos();
+        // Drive rebuilds the player — reattach periodically.
+        setInterval(attachToVideos, 2000);
+        // Refresh menu enabled state from live player + recent streams.
+        setInterval(() => {
+            if (video.operation !== 'idle') return;
+            updateVideoMenuState();
+        }, 800);
+
+        // Soft check background for recent videoplayback without probing qualities.
+        setInterval(async () => {
+            if (video.operation !== 'idle') return;
+            if (isPlaybackReadyForDownload()) {
+                updateVideoMenuState();
+                return;
+            }
+            try {
+                const response = await core.sendRuntime({ action: 'getStreams' });
+                const session = response?.streams;
+                const hasVideo = !!(
+                    session?.video
+                    || response?.globalVideo?.url
+                    || (session?.formats?.video || []).some(s => s?.url)
+                    || (session?.videoCandidates || []).some(s => s?.url)
+                );
+                if (hasVideo) {
+                    video.playbackStarted = true;
+                    video.streamActivityAt = Date.now();
+                    updateVideoMenuState();
+                }
+            } catch (_) {}
+        }, 2500);
     }
 
     function installVideoMenuClickGuard() {
@@ -305,6 +384,14 @@
 
         const activate = (item, event) => {
             if (!item || event.target?.closest?.('#psd-video-quality-picker') || video.operation !== 'idle') return;
+            // Not playing → swallow click, keep button disabled.
+            if (!isPlaybackReadyForDownload()) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                event.stopPropagation();
+                updateVideoMenuState();
+                return;
+            }
             core.muteMediaImmediately();
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -446,7 +533,23 @@
                     }))
                     .filter(option => option.height > 0);
             }
-            if (video.operation === 'picker' || video.pickerFormats) {
+            // Keep label-only picker rows intact; only merge audio onto the picker.
+            if ((video.operation === 'picker' || video.pickerFormats) && Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length) {
+                const pf = video.pickerFormats || { video: [], audio: [], progressive: [] };
+                video.pickerFormats = {
+                    video: pf.video?.length ? pf.video : video.qualityMenuOptions.map(o => ({
+                        id: `label:${o.height}`,
+                        height: o.height,
+                        qualityHeight: o.height,
+                        probeQuality: o.label || `${o.height}p`,
+                        menuLabel: o.label || `${o.height}p`,
+                        labelOnly: true,
+                        url: ''
+                    })),
+                    audio: (message.formats?.audio?.length ? message.formats.audio : pf.audio) || [],
+                    progressive: pf.progressive || []
+                };
+            } else if (video.operation === 'picker' || video.pickerFormats) {
                 video.pickerFormats = core.cloneFormats(video.formats);
             }
         } else if (message.formats) {
@@ -458,7 +561,23 @@
                 audio: (incoming.audio?.length ? incoming.audio : base.audio) || [],
                 progressive: (incoming.progressive?.length ? incoming.progressive : base.progressive) || []
             };
-            if (video.operation === 'picker' || video.pickerFormats) {
+            // Never replace label rows with a single live stream during/after download.
+            if ((video.operation === 'picker' || video.pickerFormats) && Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length) {
+                const pf = video.pickerFormats || { video: [], audio: [], progressive: [] };
+                video.pickerFormats = {
+                    video: pf.video?.length ? pf.video : video.qualityMenuOptions.map(o => ({
+                        id: `label:${o.height}`,
+                        height: o.height,
+                        qualityHeight: o.height,
+                        probeQuality: o.label || `${o.height}p`,
+                        menuLabel: o.label || `${o.height}p`,
+                        labelOnly: true,
+                        url: ''
+                    })),
+                    audio: (incoming.audio?.length ? incoming.audio : pf.audio) || [],
+                    progressive: pf.progressive || []
+                };
+            } else if (video.operation === 'picker' || video.pickerFormats) {
                 const pf = video.pickerFormats || { video: [], audio: [], progressive: [] };
                 video.pickerFormats = {
                     video: (incoming.video?.length ? incoming.video : pf.video) || [],
@@ -468,7 +587,11 @@
             }
         }
 
-        if (message.type === 'videoStreamDetected') video.playbackStarted = true;
+        if (message.type === 'videoStreamDetected') {
+            video.playbackStarted = true;
+            video.streamActivityAt = Date.now();
+            updateVideoMenuState();
+        }
         updateVideoMenuState();
         if (video.operation === 'picker') quality.update();
     }
@@ -522,16 +645,32 @@
     function finishVideoStage(stage, message) {
         videoOverlay.clearJob();
         video.operation = 'idle';
-        // After cancel/complete, keep quality list so opening Download shows picker again
-        // without re-running quality detection (until page refresh / file change).
-        if (core.hasUsableFormats(video.pickerFormats) || core.hasUsableFormats(video.formats)) {
+        // Always keep scanned quality labels so the next File → Download can
+        // reopen the picker without probing the player again.
+        const menuOpts = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
+        if (menuOpts.length) {
+            video.restorePickerOnFileMenuOpen = true;
+            video.pickerFormats = {
+                video: menuOpts.map(o => ({
+                    id: `label:${o.height}`,
+                    height: Number(o.height) || 0,
+                    qualityHeight: Number(o.height) || 0,
+                    probeQuality: o.label || o.text || `${o.height}p`,
+                    menuLabel: o.label || o.text || `${o.height}p`,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: (video.formats?.audio || video.pickerFormats?.audio || []).slice(0, 1),
+                progressive: []
+            };
+            void core.saveQualitySnapshot?.();
+        } else if (core.hasUsableFormats(video.pickerFormats) || core.hasUsableFormats(video.formats)) {
             video.restorePickerOnFileMenuOpen = true;
             if (!video.pickerFormats && video.formats) {
                 video.pickerFormats = core.cloneFormats(video.formats);
             }
         }
         updateVideoMenuState();
-        // Re-enable the in-menu Download button if the picker is still open.
         try { quality.update?.(); } catch (_) {}
         videoOverlay.update({ stage, ...(message ? { message } : {}) });
     }
@@ -576,6 +715,7 @@
         quality.init();
         bridge.init();
         installVideoMenuClickGuard();
+        installPlaybackUnlockWatch();
         installDriveFileMenuRestore();
         installStreamStorageListener();
         initMessaging();

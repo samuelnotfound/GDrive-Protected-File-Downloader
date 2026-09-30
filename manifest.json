@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "GDrive View-Only PDF & Video Downloader",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "Downloads view-only Google Drive PDFs and videos.",
   "permissions": [
+    "tabs",
     "scripting",
     "storage",
     "webRequest",
@@ -20,7 +21,6 @@
       ],
       "js": [
         "src/content/shared/utils.js",
-        "src/content/automation/autoplay.js",
         "src/content/automation/quality-trigger.js"
       ],
       "run_at": "document_idle",
@@ -86,6 +86,7 @@
     }
   ],
   "action": {
-    "default_title": "GDrive PDF & Video Downloader"
+    "default_title": "Drive Downloader",
+    "default_popup": "src/popup/popup.html"
   }
 }

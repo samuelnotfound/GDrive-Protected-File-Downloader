@@ -176,15 +176,32 @@ function pickVideoFromPools(session, request, tabId) {
         if (!video?.url) video = candidates.find(item => item?.url) || null;
     }
 
-    // Session-level last-seen video URL.
+    // Session-level last-seen video URL — preserve actual height; do not invent wantHeight.
     if (!video?.url && session?.video) {
+        const existingH = Number(
+            (Array.isArray(session?.formats?.video) && session.formats.video[0]?.qualityHeight)
+            || (Array.isArray(session?.formats?.video) && session.formats.video[0]?.height)
+            || (Array.isArray(session?.videoCandidates) && session.videoCandidates[0]?.height)
+            || 0
+        );
         video = {
             url: session.video,
             originalUrl: session.videoOriginal || session.video,
             contentLength: getStreamBytes(session.videoOriginal || session.video),
-            height: wantHeight || 0,
-            qualityHeight: wantHeight || 0
+            height: existingH,
+            qualityHeight: existingH
         };
+    }
+
+    // Only claim wantHeight when the stream was probe-tagged or already matches.
+    if (video?.url && wantHeight) {
+        const actual = Number(video.qualityHeight || video.height || 0);
+        const probeOk = video.probeToken || video.probeHeight === wantHeight || video.heightSource === 'probe';
+        if (actual && actual !== wantHeight && !probeOk) {
+            // Keep actual height; do not relabel a mismatched leftover as the requested tier.
+        } else if (!actual && probeOk) {
+            video = { ...video, height: wantHeight, qualityHeight: wantHeight };
+        }
     }
 
     return video?.url ? { mode: 'adaptive', video } : null;
@@ -244,13 +261,53 @@ async function startVideoDownload(tabId, request = {}) {
     const contextError = validateDownloadContext(session, request);
     if (contextError) return { success: false, error: contextError };
 
-    // Formats come from quality probe + network capture only (no Drive playback API).
-    // Pass tabId so we can also harvest in-memory recentStreams for audio/video.
-    const selected = selectFormats(session, request, tabId);
+    // Prefer URLs captured just-in-time for the selected quality.
+    let selected = null;
+    if (request.videoUrl) {
+        const video = {
+            url: cleanURL(request.videoUrl) || request.videoUrl,
+            originalUrl: request.videoUrl,
+            height: Number(request.qualityHeight || 0),
+            qualityHeight: Number(request.qualityHeight || 0),
+            probeQuality: request.qualityLabel || ''
+        };
+        if (request.audioUrl) {
+            selected = {
+                mode: 'adaptive',
+                video,
+                audio: {
+                    url: cleanURL(request.audioUrl) || request.audioUrl,
+                    originalUrl: request.audioUrl,
+                    mime: 'audio/mp4'
+                }
+            };
+        } else if (isMuxedStream(video)) {
+            selected = { mode: 'single', media: { ...video, progressive: true } };
+        } else {
+            const audio = pickBestAudioFromPools(session, tabId);
+            if (audio?.url) {
+                selected = {
+                    mode: 'adaptive',
+                    video,
+                    audio: {
+                        url: cleanURL(audio.originalUrl || audio.url) || audio.url,
+                        originalUrl: audio.originalUrl || audio.url,
+                        contentLength: Number(audio.contentLength) || 0,
+                        mime: audio.mime || 'audio/mp4',
+                        itag: audio.itag || ''
+                    }
+                };
+            } else {
+                selected = { mode: 'adaptive', video, audio: null, missingAudio: true };
+            }
+        }
+    }
+
+    if (!selected) selected = selectFormats(session, request, tabId);
     if (!selected) {
         return {
             success: false,
-            error: 'No usable video stream was found for this quality. Re-run quality detection or play the video once, then try again.'
+            error: 'No usable video stream was found for this quality. Play the video, pick a quality, then try again.'
         };
     }
     if (selected.missingAudio || (selected.mode === 'adaptive' && !selected.audio?.url)) {

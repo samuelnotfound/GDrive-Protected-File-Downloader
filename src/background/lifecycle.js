@@ -40,7 +40,16 @@ function isDriveHost(url) {
 async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {}) {
     try { await clearStoredSession(tabId); } catch (_) {}
     try { clearStreamCaptureState(tabId); } catch (_) {}
-    try { QUALITY_SCAN_RUNNING.delete(String(tabId)); } catch (_) {}
+    try {
+        if (typeof QUALITY_SCAN_RUNNING !== 'undefined') {
+            for (const key of [...QUALITY_SCAN_RUNNING.keys()]) {
+                if (String(key).startsWith(String(tabId) + '|') || String(key) === String(tabId)) {
+                    QUALITY_SCAN_RUNNING.delete(key);
+                }
+            }
+        }
+        if (typeof QUALITY_SCAN_TAB_LOCK !== 'undefined') QUALITY_SCAN_TAB_LOCK.delete(tabId);
+    } catch (_) {}
 
     if (clearGlobal) {
         try {
@@ -69,7 +78,7 @@ async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {
 
 /**
  * True when navigation should drop captured formats / stream state.
- * Page refresh of the same file MUST clear — signed URLs expire and must be re-captured.
+ * Same Drive file without an explicit reload → keep (quality probing must not reset).
  */
 function shouldClearSessionForNavigation(previousUrl, nextUrl, { isReload = false } = {}) {
     if (isReload) return true;
@@ -83,11 +92,7 @@ function shouldClearSessionForNavigation(previousUrl, nextUrl, { isReload = fals
     if (prevId && nextId && prevId !== nextId) return true;
     if (prevId && isDriveHost(nextUrl) && !nextId) return true;
 
-    // Same file URL after a full document load counts as a refresh.
-    if (previousUrl && nextUrl && previousUrl.split('#')[0] === nextUrl.split('#')[0] && isDriveHost(nextUrl)) {
-        return true;
-    }
-
+    // Same file, not a reload → keep session so the quality ladder is not restarted.
     return false;
 }
 
@@ -113,10 +118,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         return;
     }
 
-    // Full document load of a Drive page → treat as fresh session (no cached streams).
-    if (changeInfo?.status === 'loading' && isDriveHost(trackedUrl)) {
-        clearTabMediaState(tabId, { clearGlobal: true, fileId });
-    }
+    // Do NOT clear on status=loading — Drive SPA fires this during quality switches
+    // and would wipe the session mid-probe, causing the ladder to restart.
 });
 
 // Explicit reload / typed navigation via webNavigation (more reliable than tabs.onUpdated).

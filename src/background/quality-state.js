@@ -1,21 +1,4 @@
 
-async function prepareQualityScanState(tabId, expectedFileId = '') {
-    if (!Number.isInteger(tabId)) return { success: false, error: 'Invalid Drive tab.' };
-    const state = streamCaptureState(tabId);
-    state.activeProbe = null;
-    state.probeBuffer = [];
-    let next = null;
-    await queueSessionMutation(tabId, session => {
-        if (expectedFileId && session.fileId && session.fileId !== expectedFileId) return false;
-        session.activeQualityProbe = null;
-        session.probeCandidates = [];
-        session.streamCaptureEnabled = true;
-        next = session;
-        return session;
-    });
-    return { success: true, session: next };
-}
-
 async function beginQualityProbe(tabId, fileId, label) {
     const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const startedAt = Date.now();
@@ -74,6 +57,11 @@ async function endQualityProbe(tabId, token) {
 async function getQualityProbeCandidates(tabId, token) {
     const state = streamCaptureState(tabId);
     const memory = filterProbeCandidates(Array.isArray(state.probeBuffer) ? state.probeBuffer : [], token);
+    // Prefer in-memory probe buffer during active capture — avoid blocking on the
+    // extension-wide session mutation queue when memory already has candidates.
+    if (memory.video.length || memory.audio.length) {
+        return memory;
+    }
     const session = await getStoredSession(tabId);
     if (!session) return memory;
     const stored = filterProbeCandidates(Array.isArray(session.probeCandidates) ? session.probeCandidates : [], token);

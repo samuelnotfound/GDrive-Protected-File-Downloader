@@ -102,9 +102,6 @@ async function handleSetVideoContext({ request, tabId }) {
     return { success: true, changed, session: next };
 }
 
-const handlePrepareQualityScan = ({ request, tabId }) => prepareQualityScanState(tabId, String(request.fileId || '').trim());
-
-
 async function handleUpdateFilename({ request, tabId }) {
     const filename = String(request.filename || '').trim();
     await queueSessionMutation(tabId, session => {
@@ -252,211 +249,359 @@ async function handlePageStreamDetected({ request, tabId }) {
 
 
 
-async function storeScannedFormats(tabId, fileId, formats) {
-    await queueSessionMutation(tabId, current => {
-        if (!current || current.fileId !== fileId) return false;
+async function handleListPlayerQualityLabels({ request, tabId }) {
+    // Labels do not require a fully seeded session — only a Drive tab.
+    // Share the quality-scan lock with capture so Settings→Quality DOM work never races.
+    const existing = QUALITY_SCAN_TAB_LOCK.get(tabId);
+    if (existing?.promise) {
+        return { success: false, error: 'Another quality operation is already running on this tab.', options: [] };
+    }
 
-        // Merge — never wipe audio/video candidates the network path already stored.
-        // Scan result is preferred order, then prior session candidates, then prior formats.
-        const mergedVideo = mergeFormatLists(
-            formats?.video || [],
-            [...(current.videoCandidates || []), ...(current.formats?.video || [])],
-            byHeightWidthThenSize,
-            48
-        );
-        const mergedAudio = dedupeAudioFormats(mergeFormatLists(
-            formats?.audio || [],
-            [...(current.audioCandidates || []), ...(current.formats?.audio || [])],
-            bySizeDesc,
-            24
-        ));
-        const mergedProgressive = mergeFormatLists(
-            formats?.progressive || [],
-            current.formats?.progressive || [],
-            byHeightWidthThenSize,
-            24
-        );
+    const work = (async () => {
+    const found = await getSessionForFile(tabId, request.fileId);
+    const fileId = String(found?.fileId || request.fileId || '').trim();
 
-        current.formats = {
-            video: mergedVideo,
-            audio: mergedAudio,
-            progressive: mergedProgressive
-        };
-        current.formatsFetchedAt = Date.now();
-        current.videoCandidates = mergedVideo.slice();
-        current.audioCandidates = mergedAudio.slice();
-        current.video = mergedVideo[0]?.url || current.video || null;
-        current.audio = mergedAudio[0]?.url || current.audio || null;
-        current.videoOriginal = mergedVideo[0]?.originalUrl || current.videoOriginal || current.video;
-        current.audioOriginal = mergedAudio[0]?.originalUrl || current.audioOriginal || current.audio;
-        current.streamCaptureEnabled = true;
-        return current;
-    });
-}
+    const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
+    const QUALITY = ['quality', 'video quality', 'quality settings'];
 
-async function performQualityScan(tabId, fileId) {
     try {
-        const result = await scanQualities(tabId, fileId);
-        if (!result?.success) return result || { success: false, error: 'Trusted Drive quality scan failed.' };
+        await runQualityDom(tabId, 'enableMuteGuard');
 
-        // Prefer heights confirmed by the live Quality menu / probe pairs.
-        // qualityHeight (set when we click a menu row) beats raw height (which
-        // may still carry an itag-table guess). Never invent resolutions that
-        // were not on the menu.
-        const menuOptions = Array.isArray(result.quality?.options) ? result.quality.options : [];
-        const menuHeights = new Set(
-            menuOptions
-                .map(option => Number(option?.height || 0))
-                .filter(height => height > 0)
-        );
+        // Playback is the user's job — no autoplay. Open Settings → Quality and
+        // read every quality row at once (same as Drive Quality Trigger).
 
-        // Prefer explicit qualityStreams pairs when present — each pair is
-        // already keyed to a real menu height from the probe loop.
-        const pairVideos = (Array.isArray(result.qualityStreams) ? result.qualityStreams : [])
-            .map(pair => {
-                const video = pair?.video;
-                if (!video?.url) return null;
-                const height = Number(pair.height || video.qualityHeight || video.height || 0);
-                if (!height) return null;
-                return {
-                    ...video,
-                    height,
-                    qualityHeight: height,
-                    probeQuality: video.probeQuality || `${height}p`
-                };
-            })
-            .filter(Boolean);
+        let options = [];
+        let lastError = '';
 
-        const rawVideo = Array.isArray(result.formats?.video) ? result.formats.video : [];
-        const normalizeHeight = stream => {
-            const h = Number(stream?.qualityHeight || stream?.height || 0);
-            if (!h) return null;
+        for (let attempt = 0; attempt < 3 && !options.length; attempt++) {
+            await closePlayerMenu(tabId);
+            await sleep(200 + attempt * 150);
+            try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+            await sleep(200);
+
+            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 8000, true);
+            if (!settings?.ok) {
+                lastError = settings?.reason || 'Could not open Settings.';
+                continue;
+            }
+            await sleep(500);
+
+            const quality = await clickMenuLikeMini(
+                tabId, QUALITY, 'Quality', 8000, false,
+                Number.isInteger(settings.frameId) ? settings.frameId : null
+            );
+            if (!quality?.ok) {
+                lastError = quality?.reason || 'Could not open Quality menu.';
+                continue;
+            }
+            await sleep(500);
+
+            // Scan ALL quality labels at once while the submenu is open (all frames).
+            const deadline = Date.now() + 6000;
+            while (Date.now() < deadline) {
+            const rows = await runQualityDom(tabId, 'scanQualities');
+            const byHeight = new Map();
+            for (const row of rows || []) {
+                const value = row?.value;
+                // Our content returns { ok, options, labels }
+                const list = Array.isArray(value?.options) ? value.options
+                    : Array.isArray(value) ? value
+                    : [];
+                for (const opt of list) {
+                    if (typeof opt === 'string') {
+                        const height = Number(String(opt).match(/(\d{3,4})p/i)?.[1] || 0);
+                        if (!height) continue;
+                        byHeight.set(height, {
+                            height,
+                            label: String(opt).trim(),
+                            selected: false
+                        });
+                        continue;
+                    }
+                    const height = Number(opt?.height || 0);
+                    if (!height) continue;
+                    const label = String(opt.text || opt.label || `${height}p`).trim();
+                    const prev = byHeight.get(height);
+                    if (!prev || opt.selected) {
+                        byHeight.set(height, { height, label, selected: !!opt.selected });
+                    }
+                }
+                // Also accept plain labels array from content
+                for (const lab of (value?.labels || [])) {
+                    const height = Number(String(lab).match(/(\d{3,4})p/i)?.[1] || 0);
+                    if (!height) continue;
+                    if (!byHeight.has(height)) {
+                        byHeight.set(height, { height, label: String(lab).trim(), selected: false });
+                    }
+                }
+            }
+            options = [...byHeight.values()].sort((a, b) => b.height - a.height);
+                if (options.length) break;
+                await sleep(120);
+            }
+
+            await closePlayerMenu(tabId);
+            if (options.length) break;
+            lastError = lastError || 'No quality options were found in the menu.';
+            await sleep(300);
+        }
+
+        if (!options.length) {
+            try { await closePlayerMenu(tabId); } catch (_) {}
             return {
-                ...stream,
-                height: h,
-                qualityHeight: h
+                success: false,
+                error: lastError || 'No quality options were found in the menu.',
+                options: []
             };
-        };
-
-        let menuScopedVideo;
-        if (pairVideos.length) {
-            // Probe pairs are authoritative when the scan captured them.
-            menuScopedVideo = pairVideos;
-            // Fill any menu heights still missing from pairs with raw captures.
-            const have = new Set(pairVideos.map(s => Number(s.height)));
-            for (const stream of rawVideo) {
-                const normalized = normalizeHeight(stream);
-                if (!normalized) continue;
-                if (have.has(normalized.height)) continue;
-                if (menuHeights.size && !menuHeights.has(normalized.height)) continue;
-                menuScopedVideo.push(normalized);
-                have.add(normalized.height);
-            }
-        } else if (menuHeights.size) {
-            menuScopedVideo = rawVideo
-                .map(normalizeHeight)
-                .filter(stream => stream && menuHeights.has(stream.height));
-        } else {
-            menuScopedVideo = rawVideo.map(normalizeHeight).filter(Boolean);
         }
 
-        // One shared audio track for the file (not per quality).
-        const state = streamCaptureState(tabId);
-        const priorSession = await getStoredSession(tabId);
-        const recentAudio = (state?.recentStreams || [])
-            .filter(isAudioStream)
-            .filter(s => s?.url);
-        const audioPool = [
-            ...(Array.isArray(result.formats?.audio) ? result.formats.audio : []),
-            ...recentAudio,
-            ...(Array.isArray(priorSession?.audioCandidates) ? priorSession.audioCandidates : []),
-            ...(Array.isArray(priorSession?.formats?.audio) ? priorSession.formats.audio : [])
-        ];
-        if (priorSession?.audio) {
-            audioPool.unshift({
-                url: priorSession.audio,
-                originalUrl: priorSession.audioOriginal || priorSession.audio,
-                mime: 'audio/mp4'
-            });
-        }
-        const sharedAudioList = dedupeAudioFormats(mergeFormatLists([], audioPool, bySizeDesc));
-        const sharedAudio = sharedAudioList.length ? [sharedAudioList[0]] : [];
-
-        // Split muxed (progressive) streams out of the adaptive video list.
-        const progressive = [];
-        const adaptiveVideo = [];
-        for (const stream of mergeFormatLists([], menuScopedVideo, byHeightWidthThenSize)) {
-            if (!stream?.url) continue;
-            if (isMuxedStream(stream)) {
-                progressive.push({ ...stream, progressive: true });
-            } else {
-                adaptiveVideo.push(stream);
-            }
-        }
-        // Also promote muxed streams from the recent ring / prior session.
-        for (const stream of [
-            ...(state?.recentStreams || []),
-            ...(Array.isArray(priorSession?.videoCandidates) ? priorSession.videoCandidates : [])
-        ]) {
-            if (!stream?.url || isAudioStream(stream) || !isMuxedStream(stream)) continue;
-            progressive.push({ ...stream, progressive: true });
-        }
-
-        const scannedFormats = {
-            video: adaptiveVideo,
-            audio: sharedAudio,
-            progressive: mergeFormatLists([], progressive, byHeightWidthThenSize, 24)
-        };
-        // Persist first, but ALWAYS return/send the in-memory scannedFormats.
-        // Re-reading the session can race with concurrent stream updates and
-        // hand the picker an empty or stale formats object.
-        await storeScannedFormats(tabId, fileId, scannedFormats);
-
-        const latest = await getStoredSession(tabId);
-        const formats = scannedFormats;
-        await sendTab(tabId, {
-            type: 'videoFormatsDetected',
-            formats,
-            fileId,
-            viewerSessionId: latest?.viewerSessionId || '',
-            quality: result.quality || { options: menuOptions },
-            qualityOptions: menuOptions
-        });
         return {
             success: true,
-            formats,
-            scanReport: result.scanReport || [],
-            quality: result.quality || { options: menuOptions },
-            qualityOptions: menuOptions,
-            qualityStreams: result.qualityStreams || [],
-            observedQualityLabels: result.observedQualityLabels || []
+            fileId,
+            options,
+            formats: {
+                video: options.map(o => ({
+                    id: `label:${o.height}`,
+                    height: o.height,
+                    qualityHeight: o.height,
+                    probeQuality: o.label,
+                    menuLabel: o.label,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: [],
+                progressive: []
+            }
         };
     } catch (error) {
-        return { success: false, error: error?.message || 'Trusted Drive quality scan failed.' };
+        return { success: false, error: error?.message || 'Failed to list quality labels.', options: [] };
+    } finally {
+        try { await runQualityDom(tabId, 'releaseMuteGuard'); } catch (_) {}
+    }
+    })();
+
+    QUALITY_SCAN_TAB_LOCK.set(tabId, { promise: work, finishedAt: 0 });
+    try {
+        return await work;
+    } finally {
+        QUALITY_SCAN_TAB_LOCK.set(tabId, { promise: null, finishedAt: Date.now() });
     }
 }
 
-async function handleAutomatedQualityScan({ request, tabId }) {
+/**
+ * Phase 2 — user picked a label. Click that quality on the player, wait for ONE
+ * unique stream URL, pair with shared audio, return both for download.
+ */
+async function handleCaptureQualityForDownload({ request, tabId }) {
+    const height = Number(request.qualityHeight || request.height || 0);
+    const label = String(request.qualityLabel || request.label || (height ? `${height}p` : '')).trim();
+    if (!height && !label) {
+        return { success: false, error: 'No quality selected.' };
+    }
+
     const found = await getSessionForFile(tabId, request.fileId);
     if (!found) return sessionChangedResponse();
-    const { session, fileId } = found;
+    const { fileId } = found;
 
-    const runningKey = `${tabId}|${fileId}|${session.viewerSessionId || ''}`;
-    if (QUALITY_SCAN_RUNNING.has(runningKey)) {
-        try { return await QUALITY_SCAN_RUNNING.get(runningKey); }
-        catch (error) { return { success: false, error: error?.message || 'Quality scan failed.' }; }
+    // Tab lock so we never stack two clicks.
+    const existing = QUALITY_SCAN_TAB_LOCK.get(tabId);
+    if (existing?.promise) {
+        return { success: false, error: 'Another quality capture is already running.' };
     }
 
-    const scan = performQualityScan(tabId, fileId);
-    QUALITY_SCAN_RUNNING.set(runningKey, scan);
+    const work = (async () => {
+        try {
+            await runQualityDom(tabId, 'enableMuteGuard');
+
+            // Same as Drive Quality Trigger applyQuality:
+            // Settings → Quality → click the exact label the user picked.
+            const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
+            const QUALITY = ['quality', 'video quality', 'quality settings'];
+            const clickAt = Date.now();
+
+            await closePlayerMenu(tabId);
+            await sleep(120);
+            try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+
+            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 7000, true);
+            if (!settings?.ok) {
+                return { success: false, error: settings?.reason || 'Could not open Settings.' };
+            }
+            await sleep(400);
+
+            const quality = await clickMenuLikeMini(
+                tabId, QUALITY, 'Quality', 7000, false,
+                Number.isInteger(settings.frameId) ? settings.frameId : null
+            );
+            if (!quality?.ok) {
+                return { success: false, error: quality?.reason || 'Could not open Quality menu.' };
+            }
+            await sleep(350);
+
+            // Click the exact menu label (e.g. "720p", "720p HD").
+            const names = [label, `${label} resolution`, `${label} quality`, height ? `${height}p` : '']
+                .filter(Boolean);
+            const selected = await selectQualityVerified(
+                tabId, label || `${height}p`, height, 7000,
+                Number.isInteger(quality.frameId) ? quality.frameId : (Number.isInteger(settings.frameId) ? settings.frameId : null)
+            );
+            if (!selected?.ok) {
+                // Fallback: clickLabel with candidates
+                let clicked = false;
+                const end = Date.now() + 5000;
+                while (Date.now() < end && !clicked) {
+                    const rows = await runQualityDom(tabId, 'clickLabel', { labels: names, contains: false });
+                    clicked = (rows || []).some(r => r?.value?.ok || r?.value === true);
+                    if (!clicked) await sleep(120);
+                }
+                if (!clicked) {
+                    return { success: false, error: `Could not find ${label || height + 'p'} in the quality menu.` };
+                }
+            }
+
+            // Harvest whatever is ALREADY playing (same quality → Drive may not
+            // fire a new request when we re-select the active row).
+            const harvestCurrentVideo = () => {
+                const recent = (streamCaptureState(tabId)?.recentStreams || [])
+                    .filter(s => s?.url && !isAudioStream(s))
+                    .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+                if (recent[0]?.url) return recent[0];
+                return null;
+            };
+            const alreadyPlaying = harvestCurrentVideo();
+
+            // Nudge/seek so Drive often re-requests a segment even for the same itag.
+            try { await nudgePlaybackAfterQualitySwitch(tabId); } catch (_) {}
+
+            const probe = await beginQualityProbe(tabId, fileId, label || `${height}p`);
+            let video = null;
+            try {
+                // Short wait for a fresh post-click URL (quality change case).
+                video = await waitForQualityStream(tabId, probe.token, height, (typeof FAST_SCAN !== "undefined" ? FAST_SCAN.streamWaitMs : 1500), new Set(), clickAt);
+                if (!video?.url) {
+                    const recentAfter = (streamCaptureState(tabId)?.recentStreams || [])
+                        .filter(s => s?.url && !isAudioStream(s) && Number(s.capturedAt || 0) >= clickAt - 50)
+                        .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+                    video = recentAfter[0] || null;
+                }
+                // Same quality already playing: no new network request — reuse current stream.
+                if (!video?.url && alreadyPlaying?.url) {
+                    video = alreadyPlaying;
+                }
+                // Session last video as last resort (per-tab only). Avoid global cross-tab leak.
+                if (!video?.url) {
+                    const session = await getStoredSession(tabId);
+                    if (session?.video) {
+                        const h = Number(
+                            session.formats?.video?.[0]?.qualityHeight
+                            || session.formats?.video?.[0]?.height
+                            || session.videoCandidates?.[0]?.height
+                            || 0
+                        );
+                        video = {
+                            url: session.video,
+                            originalUrl: session.videoOriginal || session.video,
+                            height: h,
+                            qualityHeight: h
+                        };
+                    } else {
+                        video = harvestCurrentVideo();
+                    }
+                }
+            } finally {
+                try { await endQualityProbe(tabId, probe.token); } catch (_) {}
+            }
+
+            if (!video?.url) {
+                return {
+                    success: false,
+                    error: `${label || height + 'p'} is selected but no video stream URL is available. Seek the video a bit, then try Download again.`
+                };
+            }
+
+            // Only apply the requested height when the stream was probe-tagged for
+            // this capture or already reports that height. Never relabel a leftover.
+            const actualH = Number(video.height || video.qualityHeight || 0);
+            const probeMatched = (
+                video.probeToken
+                || Number(video.probeHeight || 0) === height
+                || video.heightSource === 'probe'
+                || (actualH && actualH === height)
+            );
+            const stampedHeight = probeMatched
+                ? (actualH || height)
+                : (actualH || 0);
+            video = {
+                ...video,
+                height: stampedHeight,
+                qualityHeight: stampedHeight,
+                probeQuality: label || video.probeQuality || '',
+                url: cleanURL(video.originalUrl || video.url) || video.url,
+                originalUrl: video.originalUrl || video.url
+            };
+            if (!stampedHeight && height) {
+                // Still record the requested label for UI, but do not claim the URL is that tier.
+                video.requestedHeight = height;
+                video.requestedLabel = label;
+            }
+
+            // Shared audio — session / recent / global.
+            let audio = await getCurrentSessionAudioCandidate(tabId);
+            if (!audio?.url) {
+                audio = (streamCaptureState(tabId)?.recentStreams || []).find(isAudioStream)
+                    || (typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null);
+            }
+            if (audio?.url) {
+                audio = {
+                    ...audio,
+                    url: cleanURL(audio.originalUrl || audio.url) || audio.url,
+                    originalUrl: audio.originalUrl || audio.url
+                };
+                try { await lockSharedAudioOnSession(tabId, audio); } catch (_) {}
+            }
+
+            // Persist this video onto the session so startVideoDownload can find it.
+            await queueSessionMutation(tabId, current => {
+                if (!current) return false;
+                current.formats = current.formats || { video: [], audio: [], progressive: [] };
+                current.formats.video = mergeFormatLists(
+                    current.formats.video || [],
+                    [video],
+                    byHeightWidthThenSize,
+                    48
+                );
+                if (audio?.url) {
+                    current.formats.audio = [audio];
+                    current.audio = audio.url;
+                    current.audioOriginal = audio.originalUrl;
+                }
+                current.video = video.url;
+                current.videoOriginal = video.originalUrl;
+                current.videoCandidates = addUniqueCandidate(current.videoCandidates || [], video, 24);
+                current.streamCaptureEnabled = true;
+                return current;
+            });
+
+            return {
+                success: true,
+                video,
+                audio: audio?.url ? audio : null,
+                height,
+                label
+            };
+        } finally {
+            try { await runQualityDom(tabId, 'releaseMuteGuard'); } catch (_) {}
+            try { await closePlayerMenu(tabId); } catch (_) {}
+        }
+    })();
+
+    QUALITY_SCAN_TAB_LOCK.set(tabId, { promise: work, finishedAt: 0 });
     try {
-        return await scan;
+        return await work;
     } finally {
-        if (QUALITY_SCAN_RUNNING.get(runningKey) === scan) QUALITY_SCAN_RUNNING.delete(runningKey);
+        QUALITY_SCAN_TAB_LOCK.set(tabId, { promise: null, finishedAt: Date.now() });
     }
 }
-
-
 
 async function handleClearTabCaptureState({ tabId }) {
     if (!Number.isInteger(tabId) || tabId < 0) return { success: false };
@@ -477,39 +622,132 @@ async function handleClearTabCaptureState({ tabId }) {
 }
 
 const handleGetStreams = async ({ tabId }) => {
-    // Always reload durable global streams (simple-plugin style).
     if (typeof loadGlobalStreamsFromStorage === 'function') {
         await loadGlobalStreamsFromStorage();
     }
-    let session = await getStoredSession(tabId);
-    let globalAudio = typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null;
-    let globalVideo = typeof getGlobalLastVideo === 'function' ? getGlobalLastVideo() : null;
 
-    // Attach global audio onto the session if still missing.
-    if (session && !session.audio && globalAudio?.url) {
-        await queueSessionMutation(tabId, current => {
-            if (!current) return false;
-            current.audio = globalAudio.url;
-            current.audioOriginal = globalAudio.originalUrl || globalAudio.url;
-            current.audioCandidates = addUniqueCandidate(
-                Array.isArray(current.audioCandidates) ? current.audioCandidates : [],
-                globalAudio,
-                8
-            );
-            current.formats = current.formats || { video: [], audio: [], progressive: [] };
-            current.formats.audio = [{ ...globalAudio, id: `audio:global:${globalAudio.itag || ''}` }];
-            return current;
-        });
-        session = await getStoredSession(tabId);
+    let session = Number.isInteger(tabId) ? await getStoredSession(tabId) : null;
+    const globalAudio = typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null;
+    const globalVideo = typeof getGlobalLastVideo === 'function' ? getGlobalLastVideo() : null;
+    const recent = (Number.isInteger(tabId) && typeof streamCaptureState === 'function')
+        ? (streamCaptureState(tabId)?.recentStreams || [])
+        : [];
+
+    // Harvest anything already playing: recent ring + globals, even with no formal session.
+    const recentVideo = recent.filter(s => s?.url && !isAudioStream(s));
+    const recentAudio = recent.filter(s => s?.url && isAudioStream(s));
+
+    // Ensure a minimal session object so the popup always has a place to read from.
+    if (!session) {
+        session = {
+            fileId: '',
+            filename: '',
+            formats: { video: [], audio: [], progressive: [] },
+            videoCandidates: [],
+            audioCandidates: [],
+            streamCaptureEnabled: true
+        };
     }
-    return {
-        streams: session,
-        globalAudio: globalAudio || session?.formats?.audio?.[0] || (session?.audio ? {
+    session.formats = session.formats || { video: [], audio: [], progressive: [] };
+    session.videoCandidates = Array.isArray(session.videoCandidates) ? session.videoCandidates : [];
+    session.audioCandidates = Array.isArray(session.audioCandidates) ? session.audioCandidates : [];
+
+    // Merge recent video into candidates + formats (current playing quality).
+    for (const stream of recentVideo) {
+        session.videoCandidates = addUniqueCandidate(session.videoCandidates, stream, 24);
+        if (isMuxedStream(stream)) {
+            session.formats.progressive = mergeFormatLists(
+                session.formats.progressive || [],
+                [{ ...stream, progressive: true }],
+                byHeightWidthThenSize,
+                24
+            );
+        } else {
+            session.formats.video = mergeFormatLists(
+                session.formats.video || [],
+                [stream],
+                byHeightWidthThenSize,
+                48
+            );
+        }
+        if (!session.video) {
+            session.video = stream.url;
+            session.videoOriginal = stream.originalUrl || stream.url;
+        }
+    }
+    // Global last video if still empty.
+    if (globalVideo?.url && !(session.formats.video || []).length && !(session.formats.progressive || []).length) {
+        session.videoCandidates = addUniqueCandidate(session.videoCandidates, globalVideo, 24);
+        session.formats.video = mergeFormatLists(session.formats.video || [], [globalVideo], byHeightWidthThenSize, 48);
+        session.video = globalVideo.url;
+        session.videoOriginal = globalVideo.originalUrl || globalVideo.url;
+    }
+
+    // Audio: recent → global → session
+    for (const stream of recentAudio) {
+        session.audioCandidates = addUniqueCandidate(session.audioCandidates, stream, 8);
+        if (!session.audio) {
+            session.audio = stream.url;
+            session.audioOriginal = stream.originalUrl || stream.url;
+        }
+    }
+    if (!session.audio && globalAudio?.url) {
+        session.audio = globalAudio.url;
+        session.audioOriginal = globalAudio.originalUrl || globalAudio.url;
+        session.audioCandidates = addUniqueCandidate(session.audioCandidates, globalAudio, 8);
+    }
+    if (session.audio) {
+        const a = session.audioCandidates[0] || globalAudio || recentAudio[0] || {
             url: session.audio,
             originalUrl: session.audioOriginal || session.audio,
             mime: 'audio/mp4'
-        } : null),
-        globalVideo: globalVideo || null
+        };
+        session.formats.audio = [{
+            ...a,
+            url: cleanURL(a.originalUrl || a.url) || a.url,
+            originalUrl: a.originalUrl || a.url,
+            id: a.id || `audio:${a.itag || ''}`
+        }];
+    }
+
+    // Persist merge when we have a real tab session key.
+    if (Number.isInteger(tabId) && tabId >= 0 && (session.fileId || session.video || session.audio)) {
+        try {
+            const existing = await getStoredSession(tabId);
+            if (existing) {
+                await queueSessionMutation(tabId, current => {
+                    if (!current) return false;
+                    current.video = current.video || session.video;
+                    current.videoOriginal = current.videoOriginal || session.videoOriginal;
+                    current.audio = current.audio || session.audio;
+                    current.audioOriginal = current.audioOriginal || session.audioOriginal;
+                    current.videoCandidates = mergeFormatLists(
+                        current.videoCandidates || [], session.videoCandidates || [], byHeightWidthThenSize, 48
+                    );
+                    current.audioCandidates = addUniqueCandidate(
+                        current.audioCandidates || [], session.audioCandidates?.[0], 8
+                    );
+                    current.formats = current.formats || { video: [], audio: [], progressive: [] };
+                    current.formats.video = mergeFormatLists(
+                        current.formats.video || [], session.formats.video || [], byHeightWidthThenSize, 48
+                    );
+                    current.formats.audio = (current.formats.audio?.length ? current.formats.audio : session.formats.audio) || [];
+                    current.formats.progressive = mergeFormatLists(
+                        current.formats.progressive || [], session.formats.progressive || [], byHeightWidthThenSize, 24
+                    );
+                    current.streamCaptureEnabled = true;
+                    return current;
+                });
+                session = await getStoredSession(tabId) || session;
+            }
+        } catch (_) {}
+    }
+
+    return {
+        streams: session,
+        globalAudio: session.formats?.audio?.[0] || globalAudio || null,
+        globalVideo: (session.formats?.video || [])[0] || globalVideo || null,
+        recentCount: recent.length
     };
 };
 
@@ -570,12 +808,12 @@ const ACTION_HANDLERS = Object.freeze({
     loadQualityPickerSnapshot: requireDriveTab(handleLoadQualityPickerSnapshot),
     clearQualityPickerSnapshot: requireDriveTab(handleClearQualityPickerSnapshot),
     setVideoContext: requireDriveTab(handleSetVideoContext),
-    prepareQualityScan: handlePrepareQualityScan,
     updateFilename: requireDriveTab(handleUpdateFilename),
     pageStreamDetected: requireDriveTab(handlePageStreamDetected),
     videoPlaybackIntent: requireDriveTab(handleVideoPlaybackIntent, () => ({ success: false })),
     videoPlaybackStarted: requireDriveTab(handleVideoPlaybackStarted, () => ({ success: false })),
-    automatedQualityScan: requireDriveTab(handleAutomatedQualityScan),
+    listPlayerQualityLabels: requireDriveTab(handleListPlayerQualityLabels),
+    captureQualityForDownload: requireDriveTab(handleCaptureQualityForDownload),
     clearTabCaptureState: requireDriveTab(handleClearTabCaptureState),
     getStreams: handleGetStreams,
     muteMediaNow: handleMuteMediaNow,

@@ -18,35 +18,8 @@
     // same idea as Drive Quality Trigger's scanQualities() → renderQualityList().
     // Only surfaces heights the menu actually offered, never assumed itag heights.
     function getDisplayVideoFormats(formats = [], menuOptions = null) {
-        const score = item =>
-            (/video\/mp4/i.test(String(item.mime || '')) ? 1_000_000_000 : 0) +
-            Number(item.contentLength || 0) +
-            Number(item.capturedAt || 0) / 1e9;
-
-        const byHeight = new Map();
-        for (const format of Array.isArray(formats) ? formats : []) {
-            if (!format?.url) continue;
-            // qualityHeight (menu probe) always wins over raw height (itag guess).
-            const height = Number(format.qualityHeight || format.height) || 0;
-            if (!height) continue;
-            const normalized = { ...format, height, qualityHeight: height };
-            const current = byHeight.get(height);
-            if (!current || score(normalized) > score(current)) byHeight.set(height, normalized);
-        }
-
-        // Also index by probeQuality label so a stream tagged "480p" during
-        // probing can be matched even if its itag height said something else.
-        const byProbeLabel = new Map();
-        for (const format of Array.isArray(formats) ? formats : []) {
-            if (!format?.url) continue;
-            const label = String(format.probeQuality || format.menuLabel || '').trim().toLowerCase();
-            if (!label) continue;
-            const height = Number(format.qualityHeight || format.height) || 0;
-            const normalized = { ...format, height: height || Number(label.match(/(\d{3,4})p/i)?.[1] || 0), qualityHeight: height };
-            const current = byProbeLabel.get(label);
-            if (!current || score(normalized) > score(current)) byProbeLabel.set(label, normalized);
-        }
-
+        // PRIMARY source: qualityMenuOptions from Settings→Quality scan.
+        // Every detected label is listed, with or without a stream URL.
         const menu = Array.isArray(menuOptions) ? menuOptions : (video.qualityMenuOptions || []);
         const menuHeights = menu
             .map(option => ({
@@ -55,47 +28,48 @@
             }))
             .filter(option => option.height > 0);
 
-        // Live menu is the only source of truth when we have it — never invent
-        // 1080p/720p that the player did not list (same as Drive Quality Trigger).
+        // Index any formats that already have URLs (optional enrichment).
+        const byHeight = new Map();
+        for (const format of Array.isArray(formats) ? formats : []) {
+            if (!format) continue;
+            const height = Number(format.qualityHeight || format.height) || 0;
+            if (!height) continue;
+            const prev = byHeight.get(height);
+            if (!prev || (format.url && !prev.url)) byHeight.set(height, format);
+        }
+
         if (menuHeights.length) {
             const seen = new Set();
             const ordered = [];
             for (const option of menuHeights.sort((a, b) => b.height - a.height)) {
                 if (seen.has(option.height)) continue;
-                const labelKey = (option.label || `${option.height}p`).toLowerCase();
-                const stream =
-                    byHeight.get(option.height) ||
-                    byProbeLabel.get(labelKey) ||
-                    byProbeLabel.get(`${option.height}p`);
-                if (!stream?.url) continue;
                 seen.add(option.height);
+                const stream = byHeight.get(option.height);
                 ordered.push({
-                    ...stream,
+                    id: stream?.id || `label:${option.height}`,
                     height: option.height,
                     qualityHeight: option.height,
-                    menuLabel: option.label || `${option.height}p`
+                    menuLabel: option.label || `${option.height}p`,
+                    probeQuality: option.label || `${option.height}p`,
+                    labelOnly: !stream?.url,
+                    url: stream?.url || '',
+                    originalUrl: stream?.originalUrl || stream?.url || ''
                 });
             }
-            // If menu matching produced nothing (probe race / missing pairs)
-            // fall through to captured streams so the picker is not empty.
-            if (ordered.length) return ordered;
+            return ordered;
         }
 
-        // Fallback: no menu snapshot — show captured streams, dropping pure itag guesses.
+        // Fallback: formats list (including label-only stubs).
         return [...byHeight.values()]
-            .filter(stream => {
-                const source = String(stream.heightSource || '').toLowerCase();
-                if (Number(stream.qualityHeight || 0) > 0) return true;
-                if (source === 'probe' || source === 'url') return true;
-                if (source === 'itag' || source === '') {
-                    return !!String(stream.probeQuality || '').trim();
-                }
-                return true;
-            })
-            .sort((a, b) =>
-                (Number(b.height || 0) - Number(a.height || 0)) ||
-                (Number(b.contentLength || 0) - Number(a.contentLength || 0))
-            );
+            .map(f => ({
+                ...f,
+                height: Number(f.qualityHeight || f.height || 0),
+                qualityHeight: Number(f.qualityHeight || f.height || 0),
+                menuLabel: f.menuLabel || f.probeQuality || `${f.height}p`,
+                labelOnly: !f.url
+            }))
+            .filter(f => f.height > 0)
+            .sort((a, b) => Number(b.height || 0) - Number(a.height || 0));
     }
 
     const formatVideoLabel = format => {
@@ -681,6 +655,7 @@
             option.dataset.value = value;
             option.dataset.height = String(height || '');
             option.dataset.formatId = format.id || '';
+            option.dataset.label = label;
             option.textContent = label;
             menu.appendChild(option);
 
@@ -715,19 +690,39 @@
         const pf = (video.operation === 'picker' && video.pickerFormats)
             ? video.pickerFormats
             : (video.formats || {});
-        // Union video/audio from both sources (scan snapshot + live webRequest updates).
-        const byUrl = (list) => {
+
+        // Merge by height for video (labels matter even without URL).
+        const mergeVideo = (...lists) => {
             const map = new Map();
-            for (const item of (list || [])) {
-                if (!item?.url) continue;
-                map.set(String(item.url), item);
+            for (const list of lists) {
+                for (const item of (list || [])) {
+                    if (!item) continue;
+                    const height = Number(item.qualityHeight || item.height || 0);
+                    const key = height > 0
+                        ? `h:${height}`
+                        : (item.url ? `u:${item.url}` : (item.id || ''));
+                    if (!key) continue;
+                    const prev = map.get(key);
+                    // Prefer entry that has a URL; otherwise keep label stub.
+                    if (!prev || (item.url && !prev.url)) map.set(key, item);
+                }
+            }
+            return [...map.values()];
+        };
+        const mergeByUrl = (...lists) => {
+            const map = new Map();
+            for (const list of lists) {
+                for (const item of (list || [])) {
+                    if (!item?.url) continue;
+                    map.set(String(item.url), item);
+                }
             }
             return [...map.values()];
         };
         return {
-            video: byUrl([...(pf.video || []), ...(live.video || [])]),
-            audio: byUrl([...(pf.audio || []), ...(live.audio || [])]),
-            progressive: byUrl([...(pf.progressive || []), ...(live.progressive || [])])
+            video: mergeVideo(pf.video || [], live.video || []),
+            audio: mergeByUrl(pf.audio || [], live.audio || []),
+            progressive: mergeByUrl(pf.progressive || [], live.progressive || [])
         };
     }
 
@@ -740,13 +735,13 @@
         if (!videoSelect || !download) return false;
 
         const { video: videoList, audio: audioList, progressive: progressiveList } = resolvedFormatLists();
-        const hasProgressive = progressiveList.some(item => item?.url);
-        const hasAdaptiveVideo = videoList.some(item => item?.url);
-        const hasAudio = audioList.some(item => item?.url);
+        const hasLabels = videoList.some(item =>
+            item && (Number(item.height || item.qualityHeight || 0) > 0 || item.labelOnly || item.url)
+        ) || (Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length > 0);
         const hasSelection = !!(videoSelect.value || video.lastSelectedHeight);
 
-        // Progressive is self-contained. Adaptive needs the single shared audio track.
-        const valid = !!(hasSelection && (hasProgressive || (hasAdaptiveVideo && hasAudio)));
+        // Require a real quality choice. Empty list = video not ready / not listed yet.
+        const valid = !!(hasSelection && hasLabels);
         const downloadBusy =
             video.operation === 'staging' ||
             !!videoOverlay.getJobId?.();
@@ -754,14 +749,9 @@
 
         if (status) {
             if (downloadBusy) status.textContent = 'Download in progress…';
-            else if (valid) status.textContent = '';
-            else if (hasAdaptiveVideo && !hasAudio && !hasProgressive) {
-                status.textContent = 'Waiting for audio track…';
-            } else if (!hasSelection) {
-                status.textContent = 'Select a quality to download.';
-            } else {
-                status.textContent = 'Waiting for a usable Drive stream…';
-            }
+            else if (!hasLabels) status.textContent = 'Play the video first, then open Download again.';
+            else if (!hasSelection) status.textContent = 'Select a quality to download.';
+            else status.textContent = '';
         }
         return valid;
     }
@@ -818,39 +808,17 @@
         const videoSelect = root.querySelector('#psd-video-quality-video');
 
         const { video: videoList, audio: audioList, progressive: progressiveList } = resolvedFormatLists();
-        const hasAdaptiveVideo = videoList.some(item => item?.url);
-        const hasProgressive = progressiveList.some(item => item?.url);
+        // Prefer menu options (all detected labels). Formats only enrich with URLs.
+        const menuOpts = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
+        const display = getDisplayVideoFormats(videoList, menuOpts);
+        const emptyText = 'No qualities found on the player';
 
-        const formatsForSelect = hasAdaptiveVideo
-            ? videoList
-            : (hasProgressive ? progressiveList : videoList);
-        const emptyText = hasProgressive && !hasAdaptiveVideo
-            ? 'No video format detected'
-            : 'No adaptive video format detected';
-
-        populateSelect(videoSelect, getDisplayVideoFormats(formatsForSelect, video.qualityMenuOptions), formatVideoLabel, emptyText);
+        populateSelect(videoSelect, display, formatVideoLabel, emptyText);
         updateDownloadEnabled(root);
 
-        // If UI has video but no audio yet, pull global/session audio (retry while open).
-        if (hasAdaptiveVideo && !audioList.some(a => a?.url) && !hasProgressive) {
+        // Soft audio hydrate in background (not required to select a label).
+        if (!audioList.some(a => a?.url)) {
             void hydrateSharedAudioFromSession();
-            if (!window.__PSD_AUDIO_HYDRATE_TIMER) {
-                window.__PSD_AUDIO_HYDRATE_TIMER = setInterval(() => {
-                    if (video.operation !== 'picker') {
-                        clearInterval(window.__PSD_AUDIO_HYDRATE_TIMER);
-                        window.__PSD_AUDIO_HYDRATE_TIMER = null;
-                        return;
-                    }
-                    const lists = resolvedFormatLists();
-                    if (lists.audio.some(a => a?.url)) {
-                        clearInterval(window.__PSD_AUDIO_HYDRATE_TIMER);
-                        window.__PSD_AUDIO_HYDRATE_TIMER = null;
-                        updateDownloadEnabled();
-                        return;
-                    }
-                    void hydrateSharedAudioFromSession();
-                }, 1000);
-            }
         }
 
         const mountedItem = root.closest?.('#' + VIDEO_MENU_ID);
@@ -970,41 +938,54 @@
 
     function getPickerDownloadRequest(root) {
         const rawValue = root.querySelector('#psd-video-quality-video')?.value || '';
-        const label = root.querySelector('.psd-quality-trigger-label')?.textContent?.trim() || '';
+        const label = root.querySelector('.psd-quality-trigger-label')?.textContent?.trim()
+            || video.lastSelectedQuality
+            || '';
         const pickerFormats = video.pickerFormats && video.operation === 'picker'
             ? video.pickerFormats
             : video.formats;
 
-        // Values are "h{height}:{formatId}". Parse height so we pick the right stream
-        // even when multiple rows briefly shared an underlying id.
+        // Values are "h{height}:{formatId}". The selected menu height is the source of
+        // truth for naming — never fall back to list[0] (often 1080p).
         const heightMatch = String(rawValue).match(/^h(\d+):(.*)$/);
         const selectedHeight = heightMatch
             ? Number(heightMatch[1])
-            : (Number(video.lastSelectedHeight || 0) || Number(label.match(/(\d{3,4})/)?.[1] || 0));
+            : (Number(video.lastSelectedHeight || 0)
+                || Number(label.match(/(\d{3,4})\s*p/i)?.[1] || 0)
+                || Number(label.match(/(\d{3,4})/)?.[1] || 0));
         const formatId = heightMatch ? heightMatch[2] : rawValue;
 
         const list = pickerFormats?.video?.length
             ? pickerFormats.video
             : (pickerFormats?.progressive || []);
+        // Match by height first (labels may have empty url).
         const byHeight = list.find(item =>
-            Number(item?.qualityHeight || item?.height || 0) === selectedHeight && item?.url
+            Number(item?.qualityHeight || item?.height || 0) === selectedHeight
         );
-        const byId = list.find(item => item?.id === formatId && item?.url);
-        const chosen = byHeight || byId || list[0] || null;
-        const resolvedId = chosen?.id || formatId;
-        const qualityHeight = Number(chosen?.qualityHeight || chosen?.height || selectedHeight || 0);
+        const byId = list.find(item => item?.id === formatId);
+        const chosen = byHeight || byId || null;
 
-        // Append " (480p)" so the saved file shows which quality was downloaded.
+        // Prefer explicit user selection over any format metadata / list order.
+        const qualityHeight = selectedHeight
+            || Number(chosen?.qualityHeight || chosen?.height || 0)
+            || 0;
+        const resolvedId = chosen?.id || formatId || (qualityHeight ? `label:${qualityHeight}` : '');
+
         let filename = core.getCurrentDriveFileName?.() || video.lastFilenameSent || 'gdrive-video';
         if (qualityHeight > 0) {
             const base = String(filename).replace(/\.(mp4|m4v|webm|mov|avi|mkv|flv|3gp)$/i, '');
+            // Strip any previous "(720p)" / "(1080p)" suffix before applying the real one.
             const cleaned = base.replace(/\s*\(\d{3,4}p\)\s*$/i, '').trim() || 'gdrive-video';
             filename = `${cleaned} (${qualityHeight}p).mp4`;
         }
 
-        const request = pickerFormats?.video?.length
-            ? { videoFormatId: resolvedId, qualityHeight, filename }
-            : { progressiveFormatId: resolvedId, qualityHeight, filename };
+        const request = {
+            videoFormatId: resolvedId,
+            progressiveFormatId: resolvedId,
+            qualityHeight,
+            qualityLabel: label || (qualityHeight ? `${qualityHeight}p` : ''),
+            filename
+        };
         return request;
     }
 
@@ -1036,15 +1017,21 @@
     }
 
     async function downloadFromPicker() {
+        const rootGuard = document.getElementById('psd-video-quality-picker');
+        const btnGuard = rootGuard?.querySelector('#psd-video-quality-download');
+        if (btnGuard?.disabled) return;
+        if (video._downloadGuard) return;
+        video._downloadGuard = true;
+
         core.muteMediaImmediately();
 
-        // Disallow starting another download while one is already running.
         if (video.operation === 'staging' || videoOverlay.getJobId?.()) {
             const root = document.getElementById('psd-video-quality-picker');
             const button = root?.querySelector('#psd-video-quality-download');
             const status = root?.querySelector('#psd-video-quality-status');
             if (button) button.disabled = true;
             if (status) status.textContent = 'Download in progress…';
+            video._downloadGuard = false;
             return;
         }
 
@@ -1053,21 +1040,78 @@
         const button = root.querySelector('#psd-video-quality-download');
         const status = root.querySelector('#psd-video-quality-status');
         button.disabled = true;
-        status.textContent = 'Starting download…';
 
-        const response = await core.sendDownload(request);
+        const height = Number(request.qualityHeight || video.lastSelectedHeight || 0);
+        const label = String(
+            root.querySelector('#psd-video-quality-trigger .psd-quality-trigger-label')?.textContent
+            || request.qualityLabel
+            || (height ? `${height}p` : '')
+        ).trim();
+
+        // Phase 2: click this quality on the player and capture its stream URL now.
+        status.textContent = `Switching player to ${label || height + 'p'}…`;
+        app.ui.closeDriveFileMenu();
+
+        let capture = null;
+        try {
+            capture = await core.sendRuntime({
+                action: 'captureQualityForDownload',
+                fileId: video.fileId,
+                qualityHeight: height,
+                qualityLabel: label
+            });
+        } catch (e) {
+            capture = { success: false, error: e?.message || String(e) };
+        }
+
+        if (!capture?.success || !capture.video?.url) {
+            button.disabled = false;
+            status.textContent = capture?.error || 'Could not capture a stream for that quality.';
+            video.operation = 'picker';
+            video._downloadGuard = false;
+            app.video?.updateMenuState();
+            try { await ensureQualityPickerMounted({ reopenIfMissing: true }); } catch (_) {}
+            return;
+        }
+
+        // Filename must match the quality the user picked (and we just captured),
+        // not whatever list[0] / stale request height was.
+        const pickHeight = height || Number(request.qualityHeight || 0) || 0;
+        const pickLabel = label || request.qualityLabel || (pickHeight ? `${pickHeight}p` : '');
+        let filename = core.getCurrentDriveFileName?.() || video.lastFilenameSent || 'gdrive-video';
+        if (pickHeight > 0) {
+            const base = String(filename).replace(/\.(mp4|m4v|webm|mov|avi|mkv|flv|3gp)$/i, '');
+            const cleaned = base.replace(/\s*\(\d{3,4}p\)\s*$/i, '').trim() || 'gdrive-video';
+            filename = `${cleaned} (${pickHeight}p).mp4`;
+        }
+
+        status.textContent = 'Starting download…';
+        const response = await core.sendDownload({
+            ...request,
+            qualityHeight: pickHeight,
+            qualityLabel: pickLabel,
+            filename,
+            videoUrl: capture.video.originalUrl || capture.video.url,
+            audioUrl: capture.audio?.originalUrl || capture.audio?.url || undefined,
+            videoFormatId: capture.video.id,
+            audioFormatId: capture.audio?.id
+        });
+
         if (!response?.success) {
             button.disabled = false;
             status.textContent = response?.error || 'Could not start the download.';
             video.operation = 'picker';
+            video._downloadGuard = false;
             app.video?.updateMenuState();
             return;
         }
 
         beginVideoDownload(root, response);
+        video._downloadGuard = false;
     }
 
     async function ensureCached(fileId) {
+        if (Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length) return true;
         if (core.hasUsableFormats(video.pickerFormats)) return true;
 
         const id = String(fileId || '').trim();
@@ -1076,6 +1120,7 @@
         if (!qualityPickerRestorePromise) {
             qualityPickerRestorePromise = (async () => {
                 try {
+                    if (Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length) return true;
                     if (core.hasUsableFormats(video.pickerFormats)) return true;
                     return await core.restoreQualitySnapshot(id);
                 } finally {
@@ -1089,20 +1134,38 @@
     }
 
     async function remountCached() {
-        if (!video.restorePickerOnFileMenuOpen || !getVisibleDriveMenu() || video.operation === 'picker') return false;
+        if (!video.restorePickerOnFileMenuOpen || !getVisibleDriveMenu()) return false;
+        if (video.operation === 'picker' || video.operation === 'scanning' || video.operation === 'staging') return false;
 
         const context = core.getCurrentDriveFileContext();
         const fileId = String(video.fileId || context.fileId || '').trim();
-        const restored = await ensureCached(fileId);
+        await ensureCached(fileId);
 
-        if (!restored || !core.hasUsableFormats(video.pickerFormats)) return false;
+        const menuOpts = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
+        if (menuOpts.length && !core.hasUsableFormats(video.pickerFormats)) {
+            video.pickerFormats = {
+                video: menuOpts.map(o => ({
+                    id: `label:${o.height}`,
+                    height: Number(o.height) || 0,
+                    qualityHeight: Number(o.height) || 0,
+                    probeQuality: o.label || o.text || `${o.height}p`,
+                    menuLabel: o.label || o.text || `${o.height}p`,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: (video.formats?.audio || []).slice(0, 1),
+                progressive: []
+            };
+        }
+
+        if (!core.hasUsableFormats(video.pickerFormats) && !menuOpts.length) return false;
 
         video.operation = 'picker';
-        video.formats = core.cloneFormats(video.pickerFormats);
+        video.formats = core.cloneFormats(video.pickerFormats || { video: [], audio: [], progressive: [] });
         app.video?.updateMenuState();
         updatePickerState();
 
-        const mounted = await ensureQualityPickerMounted({ reopenIfMissing: false });
+        const mounted = await ensureQualityPickerMounted({ reopenIfMissing: true });
         if (mounted) startWatch();
         return mounted;
     }

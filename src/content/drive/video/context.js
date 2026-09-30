@@ -21,7 +21,7 @@
 
     function hasUsableFormats(formats) {
         return !!(formats && (
-            formats.video?.some?.(item => item?.url) ||
+            formats.video?.some?.(item => item?.url || item?.labelOnly || Number(item?.height || item?.qualityHeight || 0) > 0) ||
             formats.audio?.some?.(item => item?.url) ||
             formats.progressive?.some?.(item => item?.url)
         ));
@@ -37,7 +37,26 @@
 
     async function saveQualitySnapshot() {
         const fileId = String(video.fileId || '').trim();
-        if (!fileId || !video.pickerFormats) return;
+        const menuOptions = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
+        // Persist labels even without stream URLs so Download can reopen the picker
+        // after a finished job without re-scanning the player menu.
+        if (!fileId || (!video.pickerFormats && !menuOptions.length)) return;
+
+        const formats = video.pickerFormats
+            ? cloneFormats(video.pickerFormats)
+            : {
+                video: menuOptions.map(o => ({
+                    id: `label:${o.height}`,
+                    height: Number(o.height) || 0,
+                    qualityHeight: Number(o.height) || 0,
+                    probeQuality: o.label || o.text || `${o.height}p`,
+                    menuLabel: o.label || o.text || `${o.height}p`,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: [],
+                progressive: []
+            };
 
         try {
             await sendRuntime({
@@ -46,7 +65,12 @@
                 snapshot: {
                     fileId,
                     viewerSessionId: String(video.viewerSessionId || ''),
-                    formats: cloneFormats(video.pickerFormats),
+                    formats,
+                    menuOptions: menuOptions.map(o => ({
+                        height: Number(o.height) || 0,
+                        label: String(o.label || o.text || '').trim(),
+                        text: String(o.text || o.label || '').trim()
+                    })),
                     savedAt: Date.now()
                 }
             });
@@ -54,11 +78,62 @@
     }
 
     async function restoreQualitySnapshot(fileId = video.fileId) {
-        // Never restore stream URLs across a page refresh. Signed Drive URLs go
-        // stale and must be re-captured in this page lifetime only.
-        // In-memory pickerFormats (same tab, no reload) is still used via
-        // video.restorePickerOnFileMenuOpen without hitting storage.
-        return false;
+        const id = String(fileId || '').trim();
+        // Prefer in-memory labels from this page session.
+        if (Array.isArray(video.qualityMenuOptions) && video.qualityMenuOptions.length) {
+            if (!video.pickerFormats) {
+                video.pickerFormats = {
+                    video: video.qualityMenuOptions.map(o => ({
+                        id: `label:${o.height}`,
+                        height: Number(o.height) || 0,
+                        qualityHeight: Number(o.height) || 0,
+                        probeQuality: o.label || o.text || `${o.height}p`,
+                        menuLabel: o.label || o.text || `${o.height}p`,
+                        labelOnly: true,
+                        url: ''
+                    })),
+                    audio: (video.formats?.audio || []).slice(0, 1),
+                    progressive: []
+                };
+            }
+            return true;
+        }
+        if (hasUsableFormats(video.pickerFormats)) return true;
+        if (!id) return false;
+
+        try {
+            const response = await sendRuntime({ action: 'loadQualityPickerSnapshot', fileId: id });
+            const snap = response?.snapshot;
+            if (!snap) return false;
+            // Only restore label rows (no signed URLs) — URLs must be re-captured on download.
+            const menu = Array.isArray(snap.menuOptions) ? snap.menuOptions : [];
+            if (menu.length) {
+                video.qualityMenuOptions = menu
+                    .map(o => ({
+                        height: Number(o.height) || 0,
+                        label: String(o.label || o.text || '').trim(),
+                        text: String(o.text || o.label || '').trim()
+                    }))
+                    .filter(o => o.height > 0);
+            }
+            const labelFormats = {
+                video: (video.qualityMenuOptions || []).map(o => ({
+                    id: `label:${o.height}`,
+                    height: o.height,
+                    qualityHeight: o.height,
+                    probeQuality: o.label || `${o.height}p`,
+                    menuLabel: o.label || `${o.height}p`,
+                    labelOnly: true,
+                    url: ''
+                })),
+                audio: [],
+                progressive: []
+            };
+            video.pickerFormats = labelFormats;
+            return !!(video.qualityMenuOptions?.length);
+        } catch (_) {
+            return false;
+        }
     }
 
     function isVideoViewerOpen() {
