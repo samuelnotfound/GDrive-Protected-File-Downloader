@@ -85,8 +85,17 @@
     } catch (_) {}
   }
 
+  // Auto-release if background never calls releaseMuteGuard (MV3 SW death mid-flow).
+  const MUTE_GUARD_MAX_MS = 45000;
+  let muteGuardAutoTimer = null;
+
   function enableMuteGuard() {
-    if (muteGuardCleanup) return;
+    if (muteGuardCleanup) {
+      // Refresh auto-release deadline on repeated enable.
+      if (muteGuardAutoTimer) clearTimeout(muteGuardAutoTimer);
+      muteGuardAutoTimer = setTimeout(() => { try { releaseMuteGuard(); } catch (_) {} }, MUTE_GUARD_MAX_MS);
+      return;
+    }
     setMainWorldMuteGuard(true);
 
     const boundRoots = new Set();
@@ -122,9 +131,15 @@
       observer.disconnect();
       muteGuardCleanup = null;
     };
+    if (muteGuardAutoTimer) clearTimeout(muteGuardAutoTimer);
+    muteGuardAutoTimer = setTimeout(() => { try { releaseMuteGuard(); } catch (_) {} }, MUTE_GUARD_MAX_MS);
   }
 
   function releaseMuteGuard() {
+    if (muteGuardAutoTimer) {
+      clearTimeout(muteGuardAutoTimer);
+      muteGuardAutoTimer = null;
+    }
     muteGuardCleanup?.();
     setMainWorldMuteGuard(false);
   }
@@ -314,21 +329,20 @@
       }
       if (!el) return { ok: false, found: false, reason: `${wantedHeight}p is not listed in this frame.` };
 
-      // Always fire a real click — even if this row is already selected.
-      // (Skipping the already-selected row is what made 480p look like a no-op.)
+      // Fire exactly one click sequence. Native .click() first; only fall back to
+      // a full synthetic pointer/mouse sequence when native click throws.
+      // (Previously both ran unconditionally → double-fire on every quality pick.)
       let done = false;
       if (mode === 'keyboard') {
         done = pressEnter(el);
       } else if (mode === 'events') {
         done = dispatchClick(el);
       } else {
-        done = clickHuman(el);
-        // Also dispatch full event sequence so Drive registers the choice
-        // when the row was already aria-checked.
-        dispatchClick(el);
-        done = true;
+        done = clickHuman(el); // uses el.click(), falls back to dispatchClick on throw
       }
 
+      // aria-checked is updated asynchronously by Drive — do not treat a same-tick
+      // read as authoritative. Callers should rely on ok/found, not selected.
       const selected = el.getAttribute('aria-checked') === 'true'
         || el.getAttribute('aria-selected') === 'true'
         || el.getAttribute('aria-current') === 'true';
@@ -337,7 +351,7 @@
         found: true,
         mode,
         label: labelOf(el).slice(0, 60),
-        selected,
+        selected, // best-effort snapshot only; may lag Drive's own handlers
         height: wantedHeight,
         wasAlreadySelected: selected
       };

@@ -103,17 +103,28 @@
     }
 
     function closeDriveFileMenu() {
+        // File is a toggle button: clicking when already closed REOPENS the menu.
+        // Only act when a menu is actually visible or aria-expanded is true.
         try {
             const fileButton = getDriveFileButton();
-            if (fileButton) {
+            const expanded = String(fileButton?.getAttribute('aria-expanded') || '').toLowerCase();
+            const menuOpen = getVisibleFileMenus().length > 0;
+            if (!menuOpen && expanded !== 'true') {
+                return false; // already closed — do not toggle open
+            }
+            if (fileButton && (menuOpen || expanded === 'true')) {
                 fileButton.click();
                 return true;
             }
         } catch (_) {}
         try {
-            document.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true
-            }));
+            // Escape only when something still looks open
+            if (getVisibleFileMenus().length > 0) {
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true
+                }));
+                return true;
+            }
         } catch (_) {}
         return false;
     }

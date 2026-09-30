@@ -403,7 +403,7 @@
 
         document.addEventListener('pointerdown', event => {
             const item = event.target?.closest?.('#' + VIDEO_MENU_ID);
-            if (item) activate(item, event);
+            if (item && item.dataset.activationInProgress !== 'true') activate(item, event);
         }, true);
         document.addEventListener('click', event => {
             if (event.target?.closest?.('#psd-video-quality-picker')) return;

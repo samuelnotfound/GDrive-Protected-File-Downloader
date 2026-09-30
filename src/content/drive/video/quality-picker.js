@@ -598,7 +598,9 @@
         video.qualityMenuOptions = [];
     }
 
-    function close(clearSnapshot = false) {
+    function close(shouldClearSnapshot = false) {
+        // Dead path today (nothing calls close()), but fixed so a future wire-up
+        // does not throw TypeError from parameter-shadowing the clearSnapshot fn.
         stopWatch();
         closeQualityDropdown();
 
@@ -606,10 +608,10 @@
         if (root) root.style.display = 'none';
 
         video.operation = 'idle';
-        video.restorePickerOnFileMenuOpen = !clearSnapshot;
+        video.restorePickerOnFileMenuOpen = !shouldClearSnapshot;
         hidePageBlocker();
 
-        if (clearSnapshot) void clearSnapshot();
+        if (shouldClearSnapshot) void clearSnapshot();
         app.video?.updateMenuState();
     }
 
@@ -1023,6 +1025,7 @@
         if (video._downloadGuard) return;
         video._downloadGuard = true;
 
+        try {
         core.muteMediaImmediately();
 
         if (video.operation === 'staging' || videoOverlay.getJobId?.()) {
@@ -1031,7 +1034,6 @@
             const status = root?.querySelector('#psd-video-quality-status');
             if (button) button.disabled = true;
             if (status) status.textContent = 'Download in progress…';
-            video._downloadGuard = false;
             return;
         }
 
@@ -1068,7 +1070,6 @@
             button.disabled = false;
             status.textContent = capture?.error || 'Could not capture a stream for that quality.';
             video.operation = 'picker';
-            video._downloadGuard = false;
             app.video?.updateMenuState();
             try { await ensureQualityPickerMounted({ reopenIfMissing: true }); } catch (_) {}
             return;
@@ -1101,13 +1102,14 @@
             button.disabled = false;
             status.textContent = response?.error || 'Could not start the download.';
             video.operation = 'picker';
-            video._downloadGuard = false;
             app.video?.updateMenuState();
             return;
         }
 
         beginVideoDownload(root, response);
-        video._downloadGuard = false;
+        } finally {
+            video._downloadGuard = false;
+        }
     }
 
     async function ensureCached(fileId) {

@@ -1,29 +1,52 @@
 
 
 
+// Serialize offscreen create/close so concurrent starts cannot race a cleanup.
+let offscreenLock = Promise.resolve();
+let offscreenGeneration = 0;
+
 async function ensureVideoOffscreen() {
-    const url = chrome.runtime.getURL('src/offscreen/video-offscreen.html');
-    if (chrome.runtime.getContexts) {
-        const contexts = await chrome.runtime.getContexts({
-            contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [url]
-        });
-        if (contexts.length) return;
-    }
-    await chrome.offscreen.createDocument({
-        url: 'src/offscreen/video-offscreen.html',
-        reasons: ['BLOBS', 'WORKERS'],
-        justification: 'Process and merge captured Google Drive video and audio streams without opening a visible tab.'
-    }).catch(error => {
-        if (!String(error?.message || '').includes('already exists')) throw error;
+    const myGen = ++offscreenGeneration;
+    const run = offscreenLock.then(async () => {
+        if (myGen !== offscreenGeneration) return; // superseded
+        const url = chrome.runtime.getURL('src/offscreen/video-offscreen.html');
+        if (chrome.runtime.getContexts) {
+            try {
+                const contexts = await chrome.runtime.getContexts({
+                    contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [url]
+                });
+                if (contexts.length) return;
+            } catch (_) {}
+        }
+        try {
+            await chrome.offscreen.createDocument({
+                url: 'src/offscreen/video-offscreen.html',
+                reasons: ['BLOBS', 'WORKERS'],
+                justification: 'Process and merge captured Google Drive video and audio streams without opening a visible tab.'
+            });
+        } catch (error) {
+            const msg = String(error?.message || error || '');
+            // Chrome wording varies: "already exists", "Only a single offscreen document", etc.
+            if (/already exists|single offscreen|only one offscreen/i.test(msg)) return;
+            throw error;
+        }
     });
+    offscreenLock = run.catch(() => {});
+    return run;
 }
 
 async function closeVideoOffscreen() {
-    try {
-        const jobs = await getStoredJobs();
-        if (Object.keys(jobs).length) return;
-        await chrome.offscreen.closeDocument();
-    } catch (_) {}
+    const myGen = offscreenGeneration; // do not bump — only close if no newer ensure is pending
+    const run = offscreenLock.then(async () => {
+        if (myGen !== offscreenGeneration) return; // a newer ensure raced ahead
+        try {
+            const jobs = await getStoredJobs();
+            if (Object.keys(jobs).length) return;
+            await chrome.offscreen.closeDocument();
+        } catch (_) {}
+    });
+    offscreenLock = run.catch(() => {});
+    return run;
 }
 
 async function createVideoStageJob(tabId, session, mode, payload) {
@@ -340,13 +363,19 @@ async function startVideoDownload(tabId, request = {}) {
             startStreamWarmup(jobId, 'media', selected.media.originalUrl || selected.media.url);
         }
 
+        // Preserve direct stream URLs + quality so a slow-start restart reuses
+        // the exact tier the user picked (not a pool re-match).
         const monitorRequest = {
             filename: finalFilename,
             fileId: request.fileId || session.fileId || '',
             viewerSessionId: request.viewerSessionId || session.viewerSessionId || '',
             videoFormatId: request.videoFormatId,
             audioFormatId: request.audioFormatId,
-            progressiveFormatId: request.progressiveFormatId
+            progressiveFormatId: request.progressiveFormatId,
+            qualityHeight: request.qualityHeight || selected.video?.qualityHeight || selected.video?.height || 0,
+            qualityLabel: request.qualityLabel || selected.video?.probeQuality || '',
+            videoUrl: request.videoUrl || selected.video?.originalUrl || selected.video?.url || selected.media?.url || '',
+            audioUrl: request.audioUrl || selected.audio?.originalUrl || selected.audio?.url || ''
         };
         startDownloadWarmupMonitor(
             jobId,

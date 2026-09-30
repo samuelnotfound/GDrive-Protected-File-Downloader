@@ -3,18 +3,24 @@ async function beginQualityProbe(tabId, fileId, label) {
     const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const startedAt = Date.now();
     const state = streamCaptureState(tabId);
-    state.activeProbe = { token, label: String(label || ''), startedAt };
-    state.probeBuffer = [];
     let result = null;
+    let accepted = false;
     await queueSessionMutation(tabId, session => {
         if (fileId && session.fileId && session.fileId !== fileId) return false;
         session.activeQualityProbe = { token, label: String(label || ''), startedAt };
         session.streamCaptureEnabled = true;
         session.probeCandidates = [];
         result = session;
+        accepted = true;
         return session;
     });
-    return { token, startedAt, session: result };
+    // Only start the in-memory probe when the session mutation was accepted.
+    // Previously memory was set unconditionally, diverging from storage on reject.
+    if (accepted) {
+        state.activeProbe = { token, label: String(label || ''), startedAt };
+        state.probeBuffer = [];
+    }
+    return { token, startedAt, session: result, accepted };
 }
 
 function filterProbeCandidates(all = [], token = '') {

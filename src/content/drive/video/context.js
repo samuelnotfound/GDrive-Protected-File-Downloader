@@ -294,8 +294,12 @@
         video.scanCache = null;
     }
 
-    function applyContextResponse(response) {
+    function applyContextResponse(response, expectedFileId = '', expectedViewerSessionId = '') {
         if (!response?.success) return;
+        // Drop stale responses from a previous file/session (out-of-order async).
+        if (expectedFileId && video.fileId && String(expectedFileId) !== String(video.fileId)) return;
+        if (expectedViewerSessionId && video.viewerSessionId
+            && String(expectedViewerSessionId) !== String(video.viewerSessionId)) return;
         const sessionFormats = response.session?.formats;
         if (hasUsableFormats(sessionFormats) || !video.pickerFormats) {
             video.formats = sessionFormats || cloneFormats({});
@@ -317,17 +321,22 @@
         if (fileId) video.fileId = fileId;
         if (changed) resetVideoContextForFileChange();
 
+        const expectedFileId = fileId;
+        const expectedViewerSessionId = video.viewerSessionId;
         video.lastFilenameSent = filename || video.lastFilenameSent || '';
         const response = await sendRuntime({
             action: 'setVideoContext',
             fileId,
             filename: filename || 'gdrive-video',
-            viewerSessionId: video.viewerSessionId,
+            viewerSessionId: expectedViewerSessionId,
             pageBridgeId: video.pageBridgeId
         });
 
-        applyContextResponse(response);
-        if (!video.pickerFormats && fileId) await restoreQualitySnapshot(fileId);
+        applyContextResponse(response, expectedFileId, expectedViewerSessionId);
+        if (!video.pickerFormats && fileId
+            && String(video.fileId || '') === String(fileId)) {
+            await restoreQualitySnapshot(fileId);
+        }
         app.video?.updateMenuState?.();
         return { fileId, filename, viewerSessionId: video.viewerSessionId };
     }

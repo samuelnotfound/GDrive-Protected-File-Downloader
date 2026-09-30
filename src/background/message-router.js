@@ -474,6 +474,9 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             try { await nudgePlaybackAfterQualitySwitch(tabId); } catch (_) {}
 
             const probe = await beginQualityProbe(tabId, fileId, label || `${height}p`);
+            if (probe && probe.accepted === false) {
+                return { success: false, error: 'Session changed during quality capture. Open the video again and retry.' };
+            }
             let video = null;
             try {
                 // Short wait for a fresh post-click URL (quality change case).
@@ -561,8 +564,10 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             }
 
             // Persist this video onto the session so startVideoDownload can find it.
+            // Reject if the tab navigated to a different Drive file mid-capture.
             await queueSessionMutation(tabId, current => {
                 if (!current) return false;
+                if (fileId && current.fileId && current.fileId !== fileId) return false;
                 current.formats = current.formats || { video: [], audio: [], progressive: [] };
                 current.formats.video = mergeFormatLists(
                     current.formats.video || [],

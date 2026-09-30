@@ -179,12 +179,19 @@ let sessionsQueue = Promise.resolve();
 let jobsCache = null;
 let jobsQueue = Promise.resolve();
 
+let sessionsLoadPromise = null;
 async function loadSessions() {
-    if (!sessionsCache) {
-        const result = await chrome.storage.local.get({ [STREAM_STORE_KEY]: {} });
-        sessionsCache = result[STREAM_STORE_KEY] || {};
+    if (sessionsCache) return sessionsCache;
+    // Cache the in-flight promise so concurrent cold-start callers share one get().
+    if (!sessionsLoadPromise) {
+        sessionsLoadPromise = chrome.storage.local.get({ [STREAM_STORE_KEY]: {} })
+            .then(result => {
+                sessionsCache = result[STREAM_STORE_KEY] || {};
+                return sessionsCache;
+            })
+            .finally(() => { sessionsLoadPromise = null; });
     }
-    return sessionsCache;
+    return sessionsLoadPromise;
 }
 
 function queueSessionMutation(tabId, mutator) {
@@ -234,11 +241,18 @@ async function clearStoredSession(tabId) {
     return task;
 }
 
+let jobsLoadPromise = null;
 async function loadJobs() {
     if (jobsCache) return jobsCache;
-    const result = await chrome.storage.local.get({ [JOB_STORE_KEY]: {} });
-    jobsCache = result[JOB_STORE_KEY] || {};
-    return jobsCache;
+    if (!jobsLoadPromise) {
+        jobsLoadPromise = chrome.storage.local.get({ [JOB_STORE_KEY]: {} })
+            .then(result => {
+                jobsCache = result[JOB_STORE_KEY] || {};
+                return jobsCache;
+            })
+            .finally(() => { jobsLoadPromise = null; });
+    }
+    return jobsLoadPromise;
 }
 
 function queueJobMutation(mutator) {

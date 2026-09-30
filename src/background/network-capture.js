@@ -1,6 +1,7 @@
 const RECENT_STREAM_LIMIT = 96;
 const PROBE_BUFFER_LIMIT = 48;
 const GLOBAL_STREAM_KEY = 'psdGlobalStreams';
+let globalStreamsQueue = Promise.resolve();
 
 // In-memory mirrors of chrome.storage.local[GLOBAL_STREAM_KEY]
 let GLOBAL_LAST_AUDIO = null;
@@ -49,16 +50,18 @@ function saveGlobalStream(kind, candidate, rawUrl) {
     if (kind === 'audio') GLOBAL_LAST_AUDIO = entry;
     else GLOBAL_LAST_VIDEO = entry;
 
+    // Serialize persisted global updates (same idea as sessionsQueue).
     try {
-        chrome.storage.local.get([GLOBAL_STREAM_KEY], result => {
+        globalStreamsQueue = globalStreamsQueue.then(async () => {
+            const result = await chrome.storage.local.get([GLOBAL_STREAM_KEY]);
             const prev = result?.[GLOBAL_STREAM_KEY] || {};
             const next = {
                 video: kind === 'video' ? entry : (prev.video || GLOBAL_LAST_VIDEO),
                 audio: kind === 'audio' ? entry : (prev.audio || GLOBAL_LAST_AUDIO),
                 timestamp: Date.now()
             };
-            chrome.storage.local.set({ [GLOBAL_STREAM_KEY]: next });
-        });
+            await chrome.storage.local.set({ [GLOBAL_STREAM_KEY]: next });
+        }).catch(() => {});
     } catch (_) {}
     return entry;
 }
