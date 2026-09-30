@@ -1025,6 +1025,7 @@
         if (video._downloadGuard) return;
         video._downloadGuard = true;
 
+        let captureBlockerShown = false;
         try {
         core.muteMediaImmediately();
 
@@ -1050,8 +1051,10 @@
             || (height ? `${height}p` : '')
         ).trim();
 
-        // Phase 2: click this quality on the player and capture its stream URL now.
-        status.textContent = `Switching player to ${label || height + 'p'}…`;
+        // Dim the page (same veil as quality probe) while we switch quality and capture.
+        const veilMsg = `Preparing ${label || (height ? height + 'p' : 'download')}…`;
+        status.textContent = veilMsg;
+        try { showPageBlocker(veilMsg); captureBlockerShown = true; } catch (_) {}
         app.ui.closeDriveFileMenu();
 
         let capture = null;
@@ -1064,6 +1067,15 @@
             });
         } catch (e) {
             capture = { success: false, error: e?.message || String(e) };
+        }
+
+        if (scanCancelled) {
+            button.disabled = false;
+            status.textContent = 'Cancelled.';
+            video.operation = 'picker';
+            app.video?.updateMenuState();
+            try { await ensureQualityPickerMounted({ reopenIfMissing: true }); } catch (_) {}
+            return;
         }
 
         if (!capture?.success || !capture.video?.url) {
@@ -1087,6 +1099,7 @@
         }
 
         status.textContent = 'Starting download…';
+        try { showPageBlocker('Starting download…'); } catch (_) {}
         const response = await core.sendDownload({
             ...request,
             qualityHeight: pickHeight,
@@ -1106,9 +1119,14 @@
             return;
         }
 
+        // beginVideoDownload hides the veil and shows the progress overlay.
         beginVideoDownload(root, response);
+        captureBlockerShown = false;
         } finally {
             video._downloadGuard = false;
+            if (captureBlockerShown) {
+                try { hidePageBlocker(); } catch (_) {}
+            }
         }
     }
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "GDrive View-Only PDF & Video Downloader",
   "version": "1.9.3",
-  "description": "Downloads view-only Google Drive PDFs and videos.",
+  "name": "GDrive Protected File Downloader",
+  "description": "Download view-only / protected Google Drive PDFs and videos.",
   "permissions": [
     "tabs",
     "scripting",
@@ -86,7 +86,7 @@
     }
   ],
   "action": {
-    "default_title": "Drive Downloader",
+    "default_title": "GDrive Protected File Downloader",
     "default_popup": "src/popup/popup.html"
   }
 }

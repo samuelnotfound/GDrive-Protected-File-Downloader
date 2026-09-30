@@ -2,12 +2,20 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     status: $('status-line'),
-    fileName: $('file-name'),
-    fileId: $('file-id'),
     videoList: $('video-list'),
     audioList: $('audio-list'),
     videoCount: $('video-count'),
     audioCount: $('audio-count'),
+  };
+
+  // Standard adaptive itags — used only when the URL/menu does not declare height.
+  const ITAG_HEIGHT = {
+    '160': 144, '133': 240, '134': 360, '135': 480,
+    '136': 720, '137': 1080, '264': 1440, '266': 2160,
+    '242': 240, '243': 360, '244': 480, '247': 720, '248': 1080,
+    '298': 720, '299': 1080, '18': 360, '22': 720,
+    '34': 360, '35': 480, '37': 1080, '43': 360,
+    '44': 480, '45': 720, '46': 1080, '59': 480
   };
 
   function cleanPlayableUrl(url) {
@@ -17,22 +25,82 @@
     return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
   }
 
+  function paramsOf(url) {
+    try { return new URL(String(url || '')).searchParams; }
+    catch (_) { return null; }
+  }
+
+  /** Bytes from stream object or clen= on the URL (full track size, not a segment). */
+  function streamBytes(stream) {
+    const listed = Number(stream?.contentLength || 0);
+    if (Number.isFinite(listed) && listed > 0) return listed;
+    const p = paramsOf(stream?.originalUrl || stream?.url);
+    if (!p) return 0;
+    const clen = Number(p.get('clen') || 0);
+    return Number.isSafeInteger(clen) && clen > 0 ? clen : 0;
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return '';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  /**
+   * Resolve display height the same way the in-page quality picker prefers:
+   *   1) explicit height/sz on the media URL
+   *   2) menu / probe label ("720p", "720p HD")
+   *   3) qualityHeight / height already stored on the candidate
+   *   4) itag table (last resort)
+   */
   function heightOf(stream) {
-    return Number(stream?.qualityHeight || stream?.height || 0) || 0;
+    const p = paramsOf(stream?.originalUrl || stream?.url);
+    if (p) {
+      const urlH = Number(p.get('height') || 0);
+      if (urlH > 0) return urlH;
+      // Some Drive URLs encode size as "1280x720"
+      const sz = String(p.get('sz') || p.get('size') || '');
+      const m = sz.match(/(\d{3,4})\s*[x×]\s*(\d{3,4})/i);
+      if (m) return Number(m[2]) || Number(m[1]) || 0;
+    }
+
+    const label = String(
+      stream?.menuLabel || stream?.probeQuality || stream?.probeQualityLabel || ''
+    );
+    const fromLabel = Number(label.match(/(\d{3,4})\s*p/i)?.[1] || 0);
+    if (fromLabel > 0) return fromLabel;
+
+    // Prefer qualityHeight only when it came from a real probe/url, not a blind stamp.
+    const qh = Number(stream?.qualityHeight || 0);
+    const h = Number(stream?.height || 0);
+    const source = String(stream?.heightSource || '');
+    if (qh > 0 && (source === 'probe' || source === 'url' || stream?.probeToken)) return qh;
+    if (h > 0) return h;
+    if (qh > 0) return qh;
+
+    const itag = String(stream?.itag || p?.get('itag') || '');
+    if (itag && ITAG_HEIGHT[itag]) return ITAG_HEIGHT[itag];
+    return 0;
   }
 
   function labelOf(stream) {
+    // Prefer the exact menu text the player showed (e.g. "720p HD").
+    const menu = String(stream?.menuLabel || stream?.probeQuality || '').trim();
+    if (menu && /\d{3,4}\s*p/i.test(menu)) return menu.replace(/\s+/g, ' ');
+
     const h = heightOf(stream);
     if (h) return `${h}p`;
-    if (stream?.probeQuality) return String(stream.probeQuality);
     if (stream?.itag) return `itag ${stream.itag}`;
-    return 'Current video';
+    return 'Video';
   }
 
   function shortUrl(url) {
     const s = String(url || '');
-    if (s.length <= 52) return s;
-    return `${s.slice(0, 28)}…${s.slice(-16)}`;
+    if (s.length <= 48) return s;
+    return `${s.slice(0, 26)}…${s.slice(-14)}`;
   }
 
   async function copyText(text, button) {
@@ -73,10 +141,26 @@
       const url = cleanPlayableUrl(raw);
       if (!url) continue;
       const h = heightOf(stream);
-      const key = h > 0 ? `h:${h}` : (stream.itag ? `itag:${stream.itag}` : `url:${url}`);
+      const itag = String(stream?.itag || paramsOf(raw)?.get('itag') || '');
+      // Dedupe by height when known, else by itag, else by URL.
+      const key = h > 0 ? `h:${h}` : (itag ? `itag:${itag}` : `url:${url}`);
       const prev = map.get(key);
-      if (!prev || Number(stream.capturedAt || 0) >= Number(prev.capturedAt || 0)) {
-        map.set(key, { ...stream, url, originalUrl: raw });
+      const bytes = streamBytes({ ...stream, url, originalUrl: raw });
+      const prevBytes = prev ? streamBytes(prev) : 0;
+      // Prefer larger clen (full track vs segment) and newer captures.
+      const better = !prev
+        || bytes > prevBytes
+        || (bytes === prevBytes && Number(stream.capturedAt || 0) >= Number(prev.capturedAt || 0));
+      if (better) {
+        map.set(key, {
+          ...stream,
+          url,
+          originalUrl: raw,
+          height: h || Number(stream.height || 0),
+          qualityHeight: h || Number(stream.qualityHeight || stream.height || 0),
+          contentLength: bytes || Number(stream.contentLength || 0),
+          itag: itag || stream.itag || ''
+        });
       }
     }
     return [...map.values()].sort((a, b) => heightOf(b) - heightOf(a));
@@ -89,8 +173,17 @@
       if (!raw) continue;
       const url = cleanPlayableUrl(raw);
       if (!url) continue;
-      if (!best || Number(stream.capturedAt || 0) >= Number(best.capturedAt || 0)) {
-        best = { ...stream, url, originalUrl: raw };
+      const bytes = streamBytes({ ...stream, url, originalUrl: raw });
+      const candidate = {
+        ...stream,
+        url,
+        originalUrl: raw,
+        contentLength: bytes || Number(stream.contentLength || 0)
+      };
+      if (!best
+        || bytes > streamBytes(best)
+        || (bytes === streamBytes(best) && Number(stream.capturedAt || 0) >= Number(best.capturedAt || 0))) {
+        best = candidate;
       }
     }
     return best ? [best] : [];
@@ -112,6 +205,14 @@
       pill.className = 'pill';
       pill.textContent = tag;
       label.appendChild(pill);
+    }
+    const sizeText = formatSize(streamBytes(stream));
+    if (sizeText) {
+      const sizePill = document.createElement('span');
+      sizePill.className = 'pill size';
+      sizePill.textContent = sizeText;
+      sizePill.title = 'Track size from stream URL (clen)';
+      label.appendChild(sizePill);
     }
 
     const urlLine = document.createElement('div');
@@ -189,9 +290,6 @@
   function render(payload) {
     const { session, videos, audios } = collectStreams(payload);
 
-    els.fileName.textContent = session.filename || '—';
-    els.fileId.textContent = session.fileId || '—';
-    els.fileId.title = session.fileId || '';
     els.videoCount.textContent = String(videos.length);
     els.audioCount.textContent = String(audios.length);
 
@@ -199,13 +297,13 @@
     if (!videos.length) {
       const empty = document.createElement('div');
       empty.className = 'empty';
-      empty.textContent = 'Play a video and switch quality to capture URLs.';
+      empty.textContent = 'No video captured yet. Use File → Download on the Drive tab.';
       els.videoList.appendChild(empty);
     } else {
       for (const v of videos) {
         els.videoList.appendChild(streamRow(v, {
           title: labelOf(v),
-          tag: v.itag ? `itag ${v.itag}` : (v.progressive ? 'muxed' : '')
+          tag: v.progressive ? 'muxed' : ''
         }));
       }
     }
@@ -214,13 +312,13 @@
     if (!audios.length) {
       const empty = document.createElement('div');
       empty.className = 'empty';
-      empty.textContent = 'No audio URL yet.';
+      empty.textContent = 'No audio yet. Play the video for a moment, then try again.';
       els.audioList.appendChild(empty);
     } else {
       const a = audios[0];
       els.audioList.appendChild(streamRow(a, {
         title: 'Audio track',
-        tag: a.itag ? `itag ${a.itag}` : 'shared'
+        tag: ''
       }));
     }
 
@@ -228,7 +326,7 @@
     if (!session?.fileId && total === 0) {
       els.status.textContent = 'Open a Google Drive video tab';
     } else if (total === 0) {
-      els.status.textContent = 'Play the video, then switch quality';
+      els.status.textContent = 'Use File → Download on the Drive tab';
     } else if (videos.length && !audios.length) {
       els.status.textContent = `${videos.length} video · waiting for audio`;
     } else {
