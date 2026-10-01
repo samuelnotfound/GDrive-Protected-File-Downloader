@@ -387,6 +387,14 @@
             info.textContent = (state.video.total > 0 || state.audio.total > 0) ? formatSeparateEstimates() : 'Download will start slow, please wait!';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
+            // A previous job may have left the ring in the indeterminate/full
+            // state. Force every new download back to an empty progress ring.
+            const ring = root.querySelector('#psd-video-progress-ring');
+            if (ring) {
+                ring.style.animation = 'none';
+                ring.style.strokeDasharray = String(CIRCUMFERENCE);
+                ring.style.strokeDashoffset = String(CIRCUMFERENCE);
+            }
         }else if (stage === 'merge') {
             title.textContent = 'Processing video';
             info.textContent = 'Download will begin shortly, please wait.';
@@ -477,8 +485,10 @@
         state.audio.total = Math.max(0, Number(audioTotal) || 0);
         state.video = { received: 0, total: state.video.total };
         state.audio = { received: 0, total: state.audio.total };
-        setRing(0);
         setState('download', null, true);
+        // Reset again after the state/class change so no stale visual state
+        // from the previous job can flash as a full circle.
+        setRing(0);
     }
     function setJob(jobId, videoTotal = 0, audioTotal = 0) {
         state.jobId = jobId || state.jobId;
