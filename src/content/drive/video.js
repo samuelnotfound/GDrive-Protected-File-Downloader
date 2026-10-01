@@ -344,40 +344,21 @@
         };
 
         attachToVideos();
-
-        // Drive frequently rebuilds the player. Prefer DOM/media events and a
-        // light fallback instead of three independent polling loops.
-        let refreshTimer = 0;
-        const scheduleRefresh = () => {
-            if (refreshTimer) return;
-            refreshTimer = setTimeout(() => {
-                refreshTimer = 0;
-                attachToVideos();
-                if (video.operation === 'idle') updateVideoMenuState();
-            }, 80);
-        };
-
-        try {
-            const observer = new MutationObserver(scheduleRefresh);
-            observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
-            window.__PSD_PLAYBACK_UNLOCK_OBSERVER = observer;
-        } catch (_) {}
-
-        document.addEventListener('playing', scheduleRefresh, true);
-        document.addEventListener('play', scheduleRefresh, true);
-        document.addEventListener('loadeddata', scheduleRefresh, true);
-        document.addEventListener('timeupdate', scheduleRefresh, { capture: true, passive: true });
-
-        // Low-frequency safety net for unusual Drive/player rebuilds.
+        // Drive rebuilds the player — reattach periodically.
+        setInterval(attachToVideos, 2000);
+        // Refresh menu enabled state from live player + recent streams.
         setInterval(() => {
-            attachToVideos();
-            if (video.operation === 'idle') updateVideoMenuState();
-        }, 5000);
+            if (video.operation !== 'idle') return;
+            updateVideoMenuState();
+        }, 800);
 
-        // Background fallback only when the live player has not produced a
-        // playback signal yet. The normal stream-detected message is event-driven.
+        // Soft check background for recent videoplayback without probing qualities.
         setInterval(async () => {
-            if (video.operation !== 'idle' || isPlaybackReadyForDownload()) return;
+            if (video.operation !== 'idle') return;
+            if (isPlaybackReadyForDownload()) {
+                updateVideoMenuState();
+                return;
+            }
             try {
                 const response = await core.sendRuntime({ action: 'getStreams' });
                 const session = response?.streams;
@@ -393,7 +374,7 @@
                     updateVideoMenuState();
                 }
             } catch (_) {}
-        }, 5000);
+        }, 2500);
     }
 
     function installVideoMenuClickGuard() {
@@ -457,7 +438,7 @@
 
         try {
             chrome.storage.onChanged.addListener((changes, area) => {
-                if (area !== 'session' || !changes.videoSessions) return;
+                if (area !== 'local' || !changes.videoSessions) return;
                 const sessions = changes.videoSessions.newValue || {};
                 const session = Object.values(sessions).find(item =>
                     item?.fileId === video.fileId &&

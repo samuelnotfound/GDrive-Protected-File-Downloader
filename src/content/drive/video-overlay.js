@@ -353,7 +353,7 @@
     }
     function stageRank(stage) {
         return({
-            download: 1, merge: 2, save: 3, processing: 3, started: 4, ready: 5, cancel: 99, cancelled: 99, error: 99
+            download: 1, merge: 2, processing: 3, started: 4, ready: 5, cancel: 99, cancelled: 99, error: 99
         })[stage] || 0;
     }
     function setState(stage, detail = null, force = false) {
@@ -380,30 +380,28 @@
                 ring.style.strokeDashoffset = String(CIRCUMFERENCE);
             }
         }else if (stage === 'merge') {
-            title.textContent = 'Merging audio and video';
+            title.textContent = 'Processing video';
             const percent = Math.round(Math.max(0, Math.min(1, Number(state.merge) || 0)) * 100);
             info.textContent = `Processing: ${percent}%`;
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             setRing(percent);
-        }else if (stage === 'save') {
-            title.textContent = 'Saving file';
-            info.textContent = detail || 'Please wait…';
+        }else if (stage === 'processing') {
+            title.textContent = 'Finalizing download';
+            info.textContent = 'Please wait..';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             root.classList.add('processing');
-            // The merged source is complete here. The offscreen document hands
-            // the finished File to the browser, which does not expose byte-level
-            // progress back to this hidden context. Never fake a partial ring.
-            setRing(100);
+            setRing(0);
         }else if (stage === 'started') {
             title.textContent = 'Download has started';
             info.textContent = '';
             cancel.style.display = 'none';
-            // The merged file is complete and the browser now owns the final
-            // save. The offscreen document cannot receive browser-download byte
-            // events, so the ring stays full once the actual file is handed off.
-            setRing(100);
+            // Chrome now owns the final file download. There is no reliable
+            // byte-progress event here, so start this stage with an empty ring
+            // instead of leaving the processing ring full or showing a fake
+            // progress segment.
+            setRing(0);
         }else if (stage === 'ready') {
             title.textContent = 'Video downloaded';
             info.textContent = '';
@@ -548,12 +546,8 @@
             setRing(percent);
             return;
         }
-        if (msg.stage === 'save') {
-            setState('save', msg.message || 'Please wait…');
-            return;
-        }
         if (msg.stage === 'processing') {
-            setState('save', msg.message || 'Preparing final file…');
+            setState('processing');
             return;
         }
         if (msg.stage === 'started') {

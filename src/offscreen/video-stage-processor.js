@@ -1,21 +1,8 @@
+
 (() => {
-    const downloader = self.GDriveVideoStreamDownloader;
-    const storage = self.GDriveVideoStageStorage;
+    const downloader = window.GDriveVideoStreamDownloader;
     const workers = new Map();
     const rejects = new Map();
-    let mergeQueueTail = Promise.resolve();
-
-    async function withMergeSlot(task) {
-        const previous = mergeQueueTail;
-        let release;
-        mergeQueueTail = new Promise(resolve => { release = resolve; });
-        await previous.catch(() => {});
-        try {
-            return await task();
-        } finally {
-            release();
-        }
-    }
 
     function getAudioCodec(url) {
         try {
@@ -38,7 +25,7 @@
         for (const id of workers.keys()) cancel(id);
     }
 
-    async function mergeStreamsNow(job, videoFile, audioFile) {
+    async function mergeStreams(job, videoBlob, audioBlob) {
         const worker = new Worker(chrome.runtime.getURL('vendor/mp4-remux-worker.js'));
         workers.set(job.jobId, worker);
         try {
@@ -61,7 +48,11 @@
                         return;
                     }
                     if (data.type === 'done') {
-                        resolve(data);
+                        if (!(data.buffer instanceof ArrayBuffer)) {
+                            reject(new Error('FFmpeg returned an invalid MP4 buffer.'));
+                            return;
+                        }
+                        resolve(new Blob([data.buffer], { type: 'video/mp4' }));
                         return;
                     }
                     if (data.type === 'error') reject(new Error(data.message || 'FFmpeg failed.'));
@@ -69,10 +60,8 @@
                 worker.onerror = event => reject(new Error(event.message || 'FFmpeg worker failed.'));
                 worker.postMessage({
                     type: 'mux',
-                    videoJobId: videoFile.jobId,
-                    videoLabel: videoFile.label,
-                    audioJobId: audioFile.jobId,
-                    audioLabel: audioFile.label,
+                    video: videoBlob,
+                    audio: audioBlob,
                     audioCodec: getAudioCodec(job.audioUrl)
                 });
             });
@@ -83,57 +72,37 @@
         }
     }
 
-    async function mergeStreams(job, videoFile, audioFile) {
-        return await withMergeSlot(() => mergeStreamsNow(job, videoFile, audioFile));
+    async function triggerDownload(blob, filename, jobId) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.rel = 'noopener';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        downloader.postStageMessage('videoStageDownloadStarted', { jobId });
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
-    async function triggerDownload(file, filename, jobId) {
-        downloader.throwIfCancelled(jobId);
-        const fileSize = Number(file?.size) || 0;
-        downloader.postStageMessage('videoStageStatus', {
-            jobId,
-            stage: 'save',
-            message: fileSize > 0 ? 'Saving final file…' : 'Starting final download…',
-            fileBytes: fileSize
-        });
-
-        const url = URL.createObjectURL(file);
-        try {
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = filename;
-            link.rel = 'noopener';
-            link.style.display = 'none';
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            downloader.postStageMessage('videoStageDownloadStarted', { jobId, fileBytes: fileSize });
-        } finally {
-            // The File object remains usable after the URL is created. Revoke the
-            // object URL later to avoid keeping the browser-side handle alive.
-            setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        }
-
-        // Source/output OPFS files are now no longer needed by the extension.
-        try { await storage.removeJob(jobId); } catch (_) {}
-    }
-
-    async function process(job, videoFile, audioFile) {
+    async function process(job, videoBlob, audioBlob) {
         downloader.throwIfCancelled(job.jobId);
-        await mergeStreams(job, videoFile, audioFile);
+        const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
         downloader.throwIfCancelled(job.jobId);
-        const mergedFile = await storage.getFile(job.jobId, 'merged', 'video/mp4');
-        await triggerDownload(mergedFile, job.filename, job.jobId);
+        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing' });
+        await triggerDownload(mergedBlob, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
     }
 
-    async function processSingle(job, mediaFile) {
+    async function processSingle(job, mediaBlob) {
         downloader.throwIfCancelled(job.jobId);
-        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'save', message: 'Preparing final file…' });
-        const file = await storage.getFile(job.jobId, mediaFile.label, job.mediaMime || 'video/mp4');
-        await triggerDownload(file, job.filename, job.jobId);
+        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing', message: 'Preparing selected quality…' });
+        const type = String(job.mediaMime || 'video/mp4').toLowerCase();
+        const blob = type.includes('mp4') ? mediaBlob : new Blob([mediaBlob], { type: type || 'video/mp4' });
+        await triggerDownload(blob, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
     }
 
-    self.GDriveVideoProcessor = { process, processSingle, cancel };
+    window.GDriveVideoProcessor = { process, processSingle, cancel };
 })();

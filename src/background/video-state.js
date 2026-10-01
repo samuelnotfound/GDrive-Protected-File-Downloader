@@ -184,7 +184,7 @@ async function loadSessions() {
     if (sessionsCache) return sessionsCache;
     // Cache the in-flight promise so concurrent cold-start callers share one get().
     if (!sessionsLoadPromise) {
-        sessionsLoadPromise = chrome.storage.session.get({ [STREAM_STORE_KEY]: {} })
+        sessionsLoadPromise = chrome.storage.local.get({ [STREAM_STORE_KEY]: {} })
             .then(result => {
                 sessionsCache = result[STREAM_STORE_KEY] || {};
                 return sessionsCache;
@@ -202,7 +202,7 @@ function queueSessionMutation(tabId, mutator) {
         const next = await mutator(current);
         if (next === false) return sessions;
         sessions[key] = next || current;
-        await chrome.storage.session.set({ [STREAM_STORE_KEY]: sessions });
+        await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions;
     });
     sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
@@ -222,7 +222,7 @@ async function setStoredSession(tabId, value) {
     const task = sessionsQueue.then(async () => {
         const sessions = await loadSessions();
         sessions[key] = value || emptySession();
-        await chrome.storage.session.set({ [STREAM_STORE_KEY]: sessions });
+        await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions[key];
     });
     sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
@@ -235,7 +235,7 @@ async function clearStoredSession(tabId) {
     const task = sessionsQueue.then(async () => {
         const sessions = await loadSessions();
         delete sessions[key];
-        await chrome.storage.session.set({ [STREAM_STORE_KEY]: sessions });
+        await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
     });
     sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
     return task;
@@ -245,7 +245,7 @@ let jobsLoadPromise = null;
 async function loadJobs() {
     if (jobsCache) return jobsCache;
     if (!jobsLoadPromise) {
-        jobsLoadPromise = chrome.storage.session.get({ [JOB_STORE_KEY]: {} })
+        jobsLoadPromise = chrome.storage.local.get({ [JOB_STORE_KEY]: {} })
             .then(result => {
                 jobsCache = result[JOB_STORE_KEY] || {};
                 return jobsCache;
@@ -259,7 +259,7 @@ function queueJobMutation(mutator) {
     const task = jobsQueue.then(async () => {
         const jobs = await loadJobs();
         const changed = await mutator(jobs);
-        if (changed !== false) await chrome.storage.session.set({ [JOB_STORE_KEY]: jobs });
+        if (changed !== false) await chrome.storage.local.set({ [JOB_STORE_KEY]: jobs });
         return jobs;
     });
     jobsQueue = task.catch(error => console.error('[GDrive SW] Stage job storage update failed:', error));

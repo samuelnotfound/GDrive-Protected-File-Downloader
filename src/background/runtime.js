@@ -9,11 +9,8 @@ const sendTab = async (tabId, message) => {
 
 const sendOffscreen = message => {
     try {
-        const promise = chrome.runtime.sendMessage({ target: 'video-offscreen', ...message });
-        return promise?.catch ? promise.catch(() => {}) : Promise.resolve();
-    } catch (_) {
-        return Promise.resolve();
-    }
+        chrome.runtime.sendMessage({ target: 'video-offscreen', ...message }).catch?.(() => {});
+    } catch (_) {}
 };
 
 const setBadge = text => {

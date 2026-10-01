@@ -3,9 +3,13 @@ const PROBE_BUFFER_LIMIT = 48;
 const GLOBAL_STREAM_KEY = 'psdGlobalStreams';
 let globalStreamsQueue = Promise.resolve();
 
-// In-memory mirrors of chrome.storage.session[GLOBAL_STREAM_KEY]
+// In-memory mirrors of chrome.storage.local[GLOBAL_STREAM_KEY]
 let GLOBAL_LAST_AUDIO = null;
 let GLOBAL_LAST_VIDEO = null;
+
+// Deduplicate onBeforeRequest + onResponseStarted for the same requestId.
+const RECENT_REQUEST_IDS = new Map(); // requestId -> expiresAt
+const REQUEST_ID_TTL_MS = 15000;
 
 function clearStreamCaptureState(tabId) {
     STREAM_CAPTURE_TABS.delete(Number(tabId));
@@ -27,7 +31,7 @@ function getGlobalLastVideo() { return GLOBAL_LAST_VIDEO; }
 function clearGlobalStreams() {
     GLOBAL_LAST_AUDIO = null;
     GLOBAL_LAST_VIDEO = null;
-    try { chrome.storage.session.remove([GLOBAL_STREAM_KEY]); } catch (_) {}
+    try { chrome.storage.local.remove([GLOBAL_STREAM_KEY]); } catch (_) {}
 }
 
 /** Persist + memory. Only call when the stream belongs to an active Drive session on this tab. */
@@ -49,14 +53,14 @@ function saveGlobalStream(kind, candidate, rawUrl) {
     // Serialize persisted global updates (same idea as sessionsQueue).
     try {
         globalStreamsQueue = globalStreamsQueue.then(async () => {
-            const result = await chrome.storage.session.get([GLOBAL_STREAM_KEY]);
+            const result = await chrome.storage.local.get([GLOBAL_STREAM_KEY]);
             const prev = result?.[GLOBAL_STREAM_KEY] || {};
             const next = {
                 video: kind === 'video' ? entry : (prev.video || GLOBAL_LAST_VIDEO),
                 audio: kind === 'audio' ? entry : (prev.audio || GLOBAL_LAST_AUDIO),
                 timestamp: Date.now()
             };
-            await chrome.storage.session.set({ [GLOBAL_STREAM_KEY]: next });
+            await chrome.storage.local.set({ [GLOBAL_STREAM_KEY]: next });
         }).catch(() => {});
     } catch (_) {}
     return entry;
@@ -64,7 +68,7 @@ function saveGlobalStream(kind, candidate, rawUrl) {
 
 async function loadGlobalStreamsFromStorage() {
     try {
-        const result = await chrome.storage.session.get([GLOBAL_STREAM_KEY]);
+        const result = await chrome.storage.local.get([GLOBAL_STREAM_KEY]);
         const data = result?.[GLOBAL_STREAM_KEY];
         if (data?.audio?.url) GLOBAL_LAST_AUDIO = data.audio;
         if (data?.video?.url) GLOBAL_LAST_VIDEO = data.video;
@@ -275,7 +279,7 @@ function notifyTabOfStream(tabId, session, candidate) {
  */
 async function fanOutToActiveSessions(candidate, requestUrl) {
     try {
-        const all = await chrome.storage.session.get(STREAM_STORE_KEY);
+        const all = await chrome.storage.local.get(STREAM_STORE_KEY);
         const sessions = all?.[STREAM_STORE_KEY] || {};
         for (const [key, session] of Object.entries(sessions)) {
             const tabId = Number(key);
@@ -297,6 +301,19 @@ function shouldUpdateGlobal(tabId, session) {
     return !!state?.activeProbe;
 }
 
+function rememberRequestId(requestId) {
+    const id = String(requestId || '');
+    if (!id) return false;
+    const now = Date.now();
+    if (RECENT_REQUEST_IDS.size > 200) {
+        for (const [k, exp] of RECENT_REQUEST_IDS) {
+            if (exp <= now) RECENT_REQUEST_IDS.delete(k);
+        }
+    }
+    if (RECENT_REQUEST_IDS.has(id)) return true; // already seen
+    RECENT_REQUEST_IDS.set(id, now + REQUEST_ID_TTL_MS);
+    return false;
+}
 
 /**
  * Capture videoplayback requests. Scoped primarily to the originating tab's
@@ -304,6 +321,9 @@ function shouldUpdateGlobal(tabId, session) {
  */
 async function recordNetworkStream(tabId, url, meta = {}) {
     if (!url || !url.includes('videoplayback')) return;
+
+    // Deduplicate the dual onBeforeRequest / onResponseStarted listeners.
+    if (meta.requestId && rememberRequestId(meta.requestId)) return;
 
     let requestUrl;
     try { requestUrl = new URL(url); } catch (_) { return; }
@@ -367,14 +387,23 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
     if (!url.includes('videoplayback')) return;
     recordNetworkStream(Number(details.tabId), url, {
         source: 'webRequest',
+        requestId: details.requestId,
         frameId: details.frameId,
         resourceType: details.type,
         tabId: details.tabId
     });
 }, { urls: ['<all_urls>'] });
 
-// Older builds stored transient signed stream URLs in persistent local storage.
-// Remove those legacy copies once; current builds keep them only in session storage.
 try {
-    void chrome.storage.local.remove([STREAM_STORE_KEY, GLOBAL_STREAM_KEY]);
+    chrome.webRequest.onResponseStarted.addListener(details => {
+        const url = String(details.url || '');
+        if (!url.includes('videoplayback')) return;
+        recordNetworkStream(Number(details.tabId), url, {
+            source: 'webRequest-response',
+            requestId: details.requestId,
+            frameId: details.frameId,
+            resourceType: details.type,
+            tabId: details.tabId
+        });
+    }, { urls: ['<all_urls>'] });
 } catch (_) {}
