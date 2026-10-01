@@ -201,90 +201,6 @@
         return utils.mediaElements('video');
     }
 
-    function findDrivePlayerElement() {
-        const candidates = [];
-        const sections = [...document.querySelectorAll(
-            'section[aria-label*="Video Player" i], [role="dialog"][aria-label*="Showing viewer" i]'
-        )];
-
-        for (const section of sections) {
-            for (const element of section.querySelectorAll('video')) {
-                if (isVisibleVideoElement(element)) candidates.push(element);
-            }
-            for (const host of section.querySelectorAll('*')) {
-                if (!host.shadowRoot) continue;
-                try {
-                    for (const element of host.shadowRoot.querySelectorAll('video')) {
-                        if (isVisibleVideoElement(element)) candidates.push(element);
-                    }
-                } catch (_) {}
-            }
-        }
-
-        for (const element of collectVideoElements()) {
-            if (isVisibleVideoElement(element) && !candidates.includes(element)) candidates.push(element);
-        }
-        return candidates[0] || null;
-    }
-
-    function getAccessibleLabel(element) {
-        return [
-            element?.getAttribute?.('aria-label'),
-            element?.getAttribute?.('title'),
-            element?.getAttribute?.('data-tooltip')
-        ].filter(Boolean).map(value => String(value).replace(/\s+/g, ' ').trim()).join(' ');
-    }
-
-    function findDrivePlayButton(player) {
-        const root = player?.closest?.('section[aria-label*="Video Player" i], [role="dialog"]') ||
-            player?.parentElement || document;
-        const candidates = [];
-
-        const collectButtons = currentRoot => {
-            try {
-                for (const element of currentRoot.querySelectorAll('[role="button"], button, [tabindex]')) {
-                    if (!isVisibleVideoElement(element)) continue;
-                    const label = getAccessibleLabel(element);
-                    const text = String(element.textContent || '').trim();
-                    if (/^\s*(play|play video|play\/pause)\s*$/i.test(label) || /^\s*play\s*$/i.test(text)) {
-                        candidates.push(element);
-                    }
-                }
-                for (const host of currentRoot.querySelectorAll('*')) {
-                    if (host.shadowRoot) collectButtons(host.shadowRoot);
-                }
-            } catch (_) {}
-        };
-
-        collectButtons(root);
-        collectButtons(document);
-        return candidates[0] || null;
-    }
-
-    function startDrivePlayerFromUserGesture() {
-        const player = findDrivePlayerElement();
-        if (!player) return { player: null, started: false };
-
-        utils.muteMedia(player);
-        const enforceMute = () => utils.muteMedia(player);
-        player.addEventListener('play', enforceMute, { once: true });
-        player.addEventListener('playing', enforceMute, { once: true });
-
-        let started = false;
-        try {
-            const promise = player.play();
-            started = true;
-            if (promise?.catch) promise.catch(() => {
-                try { findDrivePlayButton(player)?.click(); } catch (_) {}
-            });
-        } catch (_) {}
-
-        if (player.paused) {
-            try { findDrivePlayButton(player)?.click(); } catch (_) {}
-        }
-        return { player, started };
-    }
-
     function resetVideoContextForFileChange() {
         app.videoQuality?.stopWatch?.();
         video.playbackStarted = false;
@@ -399,9 +315,6 @@
         getCurrentDriveFileContext,
         getCurrentDriveFileName,
         createViewerSessionId,
-        findDrivePlayerElement,
-        findDrivePlayButton,
-        startDrivePlayerFromUserGesture,
         syncViewerContext,
         updateCapturedVideoFilename,
         isVisibleVideoElement,

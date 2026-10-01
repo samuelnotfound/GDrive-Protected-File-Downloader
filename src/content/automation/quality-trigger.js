@@ -35,11 +35,6 @@
     return (pool || elements()).find(el => descriptor(el).some(v => wanted.includes(v))) || null;
   }
 
-  function findContains(texts, pool) {
-    const wanted = texts.map(norm);
-    return (pool || elements()).find(el => descriptor(el).some(v => wanted.some(w => v === w || v.includes(w)))) || null;
-  }
-
   function clickHuman(el) {
     if (!el) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
@@ -59,16 +54,6 @@
         const extra = Ctor === MouseEvent ? {} : { pointerId: 1, pointerType: 'mouse', isPrimary: true };
         el.dispatchEvent(new Ctor(type, { ...base, ...extra, buttons: type.includes('down') ? 1 : 0 }));
       } catch (_) {}
-    }
-    return true;
-  }
-
-  function pressEnter(el) {
-    if (!el) return false;
-    try { el.focus?.({ preventScroll: true }); } catch (_) {}
-    const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
-    for (const type of ['keydown', 'keypress', 'keyup']) {
-      try { el.dispatchEvent(new KeyboardEvent(type, init)); } catch (_) {}
     }
     return true;
   }
@@ -221,67 +206,18 @@
     return rows;
   }
 
-  async function play() {
-    enableMuteGuard();
-    const videos = mediaElements('video');
-    for (const v of videos) muteMedia(v);
-
-    const ordered = videos.slice().sort((a, b) => {
-      const ap = (!a.paused && !a.ended) ? 1 : 0, bp = (!b.paused && !b.ended) ? 1 : 0;
-      return (bp - ap) || (areaOf(b) - areaOf(a));
-    });
-    if (ordered.some(v => !v.paused && !v.ended)) return { ok: true, playing: true, method: 'already playing' };
-
-    for (const v of ordered) {
-      try {
-        muteMedia(v);
-        const promise = v.play();
-        if (promise?.then) await promise.catch(() => {});
-        await sleep(80);
-        muteMedia(v);
-        if (!v.paused && !v.ended) {
-          return { ok: true, playing: true, method: 'video.play()', currentTime: Number(v.currentTime || 0) };
-        }
-      } catch (_) {}
-    }
-
-    const playButton = findExact(['play', 'play video', 'playback', 'start playback']);
-    if (playButton) {
-      clickHuman(playButton);
-      await sleep(120);
-      for (const v of mediaElements('video')) muteMedia(v);
-      if (mediaElements('video').some(v => !v.paused && !v.ended)) {
-        return { ok: true, playing: true, method: 'Play-button click' };
-      }
-    }
-
-    await sleep(100);
-    const started = mediaElements('video').some(v => !v.paused && !v.ended && (v.currentTime > 0 || v.readyState >= 3));
-    return { ok: started, playing: started, method: started ? 'play state confirmation' : 'exhausted', videoCount: videos.length };
-  }
-
   chrome.runtime.onMessage.addListener(message => {
     if (message?.type === 'PSD_MUTE_MEDIA_NOW') muteAllMediaNow();
   });
 
   window.__driveQualityActions = {
-    ping: () => ({ ok: true, url: location.href, videoCount: mediaElements('video').length, controls: elements().length }),
-
-    play,
-
     revealControls: () => ({ ok: revealControls() }),
 
-    clickLabel: ({ labels = [], contains = false, reveal = false } = {}) => {
+    clickLabel: ({ labels = [], reveal = false } = {}) => {
       if (reveal) revealControls();
-      const el = contains ? findContains(labels) : findExact(labels);
+      const el = findExact(labels);
       if (!el) return { ok: false, found: false };
       return { ok: clickHuman(el), found: true, label: labelOf(el).slice(0, 60) };
-    },
-
-    findLabel: ({ labels = [], contains = false, reveal = false } = {}) => {
-      if (reveal) revealControls();
-      const el = contains ? findContains(labels) : findExact(labels);
-      return { ok: !!el, found: !!el, label: el ? labelOf(el).slice(0, 60) : '' };
     },
 
     // Mirror Drive Quality Trigger: read the live Quality submenu labels
@@ -313,7 +249,7 @@
       };
     },
 
-    clickQuality: ({ height = 0, label = '', mode = 'click' } = {}) => {
+    clickQuality: ({ height = 0, label = '' } = {}) => {
       const wantedHeight = Number(height) || heightOfLabel(label);
       const names = label ? [label, `${label} resolution`, `${label} quality`]
         : [`${wantedHeight}p`, `${wantedHeight}p resolution`, `${wantedHeight}p quality`];
@@ -331,15 +267,7 @@
 
       // Fire exactly one click sequence. Native .click() first; only fall back to
       // a full synthetic pointer/mouse sequence when native click throws.
-      // (Previously both ran unconditionally → double-fire on every quality pick.)
-      let done = false;
-      if (mode === 'keyboard') {
-        done = pressEnter(el);
-      } else if (mode === 'events') {
-        done = dispatchClick(el);
-      } else {
-        done = clickHuman(el); // uses el.click(), falls back to dispatchClick on throw
-      }
+      const done = clickHuman(el);
 
       // aria-checked is updated asynchronously by Drive — do not treat a same-tick
       // read as authoritative. Callers should rely on ok/found, not selected.
@@ -349,7 +277,6 @@
       return {
         ok: !!done,
         found: true,
-        mode,
         label: labelOf(el).slice(0, 60),
         selected, // best-effort snapshot only; may lag Drive's own handlers
         height: wantedHeight,

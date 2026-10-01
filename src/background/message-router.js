@@ -2,7 +2,6 @@ const PICKER_SNAPSHOT_KEY = 'psdQualityPickerSnapshots';
 
 const invalidTabResponse = () => ({ success: false, error: 'Invalid Drive tab.' });
 const sessionChangedResponse = () => ({ success: false, error: 'The current Drive video session changed.' });
-const hasAudioMime = stream => /audio/i.test(String(stream?.mime || ''));
 
 const requireDriveTab = (handler, unauthorizedResponse = invalidTabResponse) =>
     ctx => (Number.isInteger(ctx.tabId) ? handler(ctx) : unauthorizedResponse());
@@ -450,7 +449,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 let clicked = false;
                 const end = Date.now() + 5000;
                 while (Date.now() < end && !clicked) {
-                    const rows = await runQualityDom(tabId, 'clickLabel', { labels: names, contains: false });
+                    const rows = await runQualityDom(tabId, 'clickLabel', { labels: names });
                     clicked = (rows || []).some(r => r?.value?.ok || r?.value === true);
                     if (!clicked) await sleep(120);
                 }

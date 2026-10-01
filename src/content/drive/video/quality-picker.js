@@ -217,10 +217,6 @@
         }
     }
 
-    function syncQualityPickerTypography() {
-        /* typography is owned by the template CSS */
-    }
-
     const QUALITY_PICKER_TEMPLATE = `
             <style>
                 #psd-video-quality-picker{
@@ -599,8 +595,7 @@
     }
 
     function close(shouldClearSnapshot = false) {
-        // Dead path today (nothing calls close()), but fixed so a future wire-up
-        // does not throw TypeError from parameter-shadowing the clearSnapshot fn.
+        // Close the picker and release its menu/watch state.
         stopWatch();
         closeQualityDropdown();
 
@@ -823,8 +818,6 @@
             void hydrateSharedAudioFromSession();
         }
 
-        const mountedItem = root.closest?.('#' + VIDEO_MENU_ID);
-        if (mountedItem) syncQualityPickerTypography(mountedItem);
     }
 
     function resetScanUI() {
@@ -837,16 +830,6 @@
         video.operation = 'idle';
         hidePageBlocker();
         app.video?.updateMenuState();
-    }
-
-    function describeScanReport(report, fallback) {
-        const missed = (Array.isArray(report) ? report : [])
-            .filter(item => item && !item.captured)
-            .map(item => `${item.height}p`);
-
-        return missed.length
-            ? `${fallback ? fallback + ' ' : ''}Could not capture ${missed.join(', ')}. open Download again to retry.`.trim()
-            : fallback;
     }
 
     function prepareQualityPicker(formats, message, menuOptions = null) {
@@ -1215,9 +1198,7 @@
         waitForDriveFileMenuClosed,
         showPageBlocker,
         hidePageBlocker,
-        isScanCancelled,
         resetScanUI,
-        describeScanReport,
         show: showQualityPicker,
         download: downloadFromPicker,
         update: updatePickerState,
@@ -1227,7 +1208,6 @@
         ensureCached,
         remountCached,
         ensureQualityPickerMounted,
-        syncTypography: syncQualityPickerTypography,
         normalizeMenuItem: item => app.video?.normalizeQualityMenuItem?.(item),
         mountQualityPicker,
         getDisplayVideoFormats

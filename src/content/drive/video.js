@@ -73,7 +73,6 @@
 
         document.querySelectorAll('#' + VIDEO_MENU_ID).forEach(item => {
             normalizeQualityMenuItem(item);
-            quality.syncTypography(item);
 
             const label = item.querySelector('.psd-video-menu-label');
             const info = item.querySelector('.psd-video-menu-info');

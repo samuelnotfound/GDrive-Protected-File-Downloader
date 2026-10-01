@@ -45,11 +45,9 @@ async function getTargetFrameIds(tabId, frameId) {
 async function runQualityDom(tabId, action, params = {}, options = {}) {
     const frameIds = await getTargetFrameIds(tabId, options.frameId);
     // Actions that take a single options object vs no args.
-    const finalArgs = (action === 'clickLabel' || action === 'clickQuality' || action === 'findLabel'
-        || action === 'nudgePlayback')
+    const finalArgs = (action === 'clickLabel' || action === 'clickQuality' || action === 'nudgePlayback')
         ? [params]
-        : (action === 'enableMuteGuard' || action === 'releaseMuteGuard' || action === 'ping'
-            || action === 'play' || action === 'closeMenu' || action === 'revealControls'
+        : (action === 'enableMuteGuard' || action === 'releaseMuteGuard' || action === 'closeMenu' || action === 'revealControls'
             || action === 'scanQualities' || action === 'resumePlayback')
             ? []
             : [params];
@@ -57,7 +55,7 @@ async function runQualityDom(tabId, action, params = {}, options = {}) {
     // When a preferred frame is known, only that frame is targeted (getTargetFrameIds).
     // When broadcasting, stop after the first successful click-like action so we do not
     // click Settings/Quality in multiple frames.
-    const isClickAction = action === 'clickLabel' || action === 'clickQuality' || action === 'findLabel';
+    const isClickAction = action === 'clickLabel' || action === 'clickQuality';
     const rows = [];
     for (const frameId of frameIds) {
         const row = await callTriggerInFrame(tabId, frameId, action, finalArgs);

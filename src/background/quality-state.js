@@ -60,23 +60,6 @@ async function endQualityProbe(tabId, token) {
     };
 }
 
-async function getQualityProbeCandidates(tabId, token) {
-    const state = streamCaptureState(tabId);
-    const memory = filterProbeCandidates(Array.isArray(state.probeBuffer) ? state.probeBuffer : [], token);
-    // Prefer in-memory probe buffer during active capture — avoid blocking on the
-    // extension-wide session mutation queue when memory already has candidates.
-    if (memory.video.length || memory.audio.length) {
-        return memory;
-    }
-    const session = await getStoredSession(tabId);
-    if (!session) return memory;
-    const stored = filterProbeCandidates(Array.isArray(session.probeCandidates) ? session.probeCandidates : [], token);
-    return {
-        video: mergeFormatLists([], [...memory.video, ...stored.video], byHeightThenSize, 48),
-        audio: mergeFormatLists([], [...memory.audio, ...stored.audio], bySizeDesc, 48)
-    };
-}
-
 async function getCurrentSessionAudioCandidate(tabId) {
     const session = await getStoredSession(tabId);
     const state = streamCaptureState(tabId);

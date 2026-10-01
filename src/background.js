@@ -2,7 +2,6 @@ importScripts(
     'background/config.js',
     'background/runtime.js',
     'background/network-capture.js',
-    'background/playback-inspection.js',
     'background/quality-dom.js',
     'background/format-catalog.js',
     'background/video-state.js',

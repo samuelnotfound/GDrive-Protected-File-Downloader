@@ -1,7 +1,7 @@
 (() => {
     const NS = 'GDriveVideoOverlay';
     const CIRCUMFERENCE = 106.81415022205297;
-    const DOWNLOAD_WEIGHT = 0.75;
+    const DOWNLOAD_WEIGHT = 1;
     const state = {
         jobId: null,
         stage: 'download',
@@ -190,22 +190,6 @@
 #psd-video-progress-overlay.error #psd-video-progress-cancel-icon {
     display: grid;
 }
-#psd-video-progress-overlay.started #psd-video-progress-spinner {
-    visibility: visible;
-}
-#psd-video-progress-overlay.started #psd-video-progress-spinner svg {
-    animation: psd-video-indeterminate-spin .95s linear infinite;
-}
-#psd-video-progress-overlay.started #psd-video-progress-spinner .ring {
-    stroke-dasharray: 30 77;
-    stroke-dashoffset: 0;
-    transition: none;
-}
-@keyframes psd-video-indeterminate-spin {
-    to {
-        transform: rotate(270deg);
-    }
-}
 #psd-video-progress-overlay.completed #psd-video-progress-cancel {
     display: none;
 }
@@ -252,7 +236,7 @@
             </div>
             <div id="psd-video-progress-title-wrap">
               <div id="psd-video-progress-title">Downloading Stream</div>
-              <div id="psd-video-progress-detail">Download will start slow, please wait!</div>
+              <div id="psd-video-progress-detail"></div>
             </div>
             <button id="psd-video-progress-cancel" type="button">Cancel</button>
             <button id="psd-video-progress-close" type="button" aria-label="Close">×</button>
@@ -339,7 +323,7 @@
                 streamLine('Audio', state.audio.received, state.audio.total)
             );
         }
-        return 'Download will start slow, please wait!';
+        return '';
     }
     function formatSeparateEstimates() {
         const hasVideo = state.video.total > 0;
@@ -349,7 +333,7 @@
         }
         if (hasVideo) return `Video: ${formatBytes(state.video.total)}`;
         if (hasAudio) return `Audio: ${formatBytes(state.audio.total)}`;
-        return 'Download will start slow, please wait!';
+        return '';
     }
     function downloadOverallPercent() {
         const combinedSize = combinedTotal();
@@ -384,7 +368,7 @@
             title.textContent = state.qualityLabel
                 ? `Downloading ${state.qualityLabel}`
                 : 'Downloading Stream';
-            info.textContent = (state.video.total > 0 || state.audio.total > 0) ? formatSeparateEstimates() : 'Download will start slow, please wait!';
+            info.textContent = formatSeparateProgress();
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             // A previous job may have left the ring in the indeterminate/full
@@ -397,25 +381,27 @@
             }
         }else if (stage === 'merge') {
             title.textContent = 'Processing video';
-            info.textContent = 'Download will begin shortly, please wait.';
+            const percent = Math.round(Math.max(0, Math.min(1, Number(state.merge) || 0)) * 100);
+            info.textContent = `Processing: ${percent}%`;
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
+            setRing(percent);
         }else if (stage === 'processing') {
             title.textContent = 'Finalizing download';
             info.textContent = 'Please wait..';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             root.classList.add('processing');
+            setRing(0);
         }else if (stage === 'started') {
             title.textContent = 'Download has started';
             info.textContent = '';
             cancel.style.display = 'none';
-            root.classList.add('started');
-            const ring = root.querySelector('#psd-video-progress-ring');
-            if (ring) {
-                ring.style.strokeDasharray = '30 77';
-                ring.style.strokeDashoffset = '0';
-            }
+            // Chrome now owns the final file download. There is no reliable
+            // byte-progress event here, so start this stage with an empty ring
+            // instead of leaving the processing ring full or showing a fake
+            // progress segment.
+            setRing(0);
         }else if (stage === 'ready') {
             title.textContent = 'Video downloaded';
             info.textContent = '';
@@ -511,16 +497,11 @@
             } else if (msg.warmup.phase === 'checking') {
                 state.warmupPhase = 'checking';
                 if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
-                if (detail) detail.textContent = 'Checking download speed…';
+                if (detail) detail.textContent = formatSeparateProgress();
             } else if (msg.warmup.phase === 'done') {
                 state.warmupPhase = null;
                 if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
-                if (detail) {
-                    detail.textContent = (state.video.total > 0 || state.audio.total > 0 ||
-                        state.video.received > 0 || state.audio.received > 0)
-                        ? formatSeparateProgress()
-                        : 'Downloading…';
-                }
+                if (detail) detail.textContent = formatSeparateProgress();
                 // Refresh ring with whatever progress we already have.
                 if (state.stage === 'download') {
                     setRing(downloadOverallPercent() * DOWNLOAD_WEIGHT * 100);
@@ -528,10 +509,7 @@
             } else if (msg.warmup.remainingSec > 0) {
                 state.warmupPhase = 'warmup';
                 if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
-                if (detail) {
-                    const sec = Math.max(1, Number(msg.warmup.remainingSec) || 1);
-                    detail.textContent = `Warming up download: ${sec}s`;
-                }
+                if (detail) detail.textContent = formatSeparateProgress();
             }
             return;
         }
@@ -546,14 +524,10 @@
             const percent = downloadOverallPercent();
             if (state.stage === 'download') setRing(percent * DOWNLOAD_WEIGHT * 100);
 
-            // Once warmup/check is finished, keep the detail text in sync with progress.
-            // During warmup/checking the detail is reserved for status messages.
-            if (!state.warmupPhase) {
-                const detail = root.querySelector('#psd-video-progress-detail');
-                if (detail) {
-                    detail.textContent = formatSeparateProgress();
-                }
-            }
+            // Always show per-stream byte progress, including during warmup.
+            // The warmup countdown/status text is intentionally hidden.
+            const detail = root.querySelector('#psd-video-progress-detail');
+            if (detail) detail.textContent = formatSeparateProgress();
             return;
         }
         if (msg.stage === 'download') {
@@ -564,9 +538,12 @@
             return;
         }
         if (msg.stage === 'merge') {
-            if (!setState('merge')) return;
             state.merge = Math.max(0, Math.min(1, Number(msg.progress) || 0));
-            setRing(DOWNLOAD_WEIGHT * 100 + state.merge * (100 - DOWNLOAD_WEIGHT * 100));
+            if (!setState('merge')) return;
+            const percent = state.merge * 100;
+            const info = root.querySelector('#psd-video-progress-detail');
+            if (info) info.textContent = `Processing: ${Math.round(percent)}%`;
+            setRing(percent);
             return;
         }
         if (msg.stage === 'processing') {

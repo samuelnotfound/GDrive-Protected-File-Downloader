@@ -21,7 +21,6 @@ async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = f
         }
         const rows = await runQualityDom(tabId, 'clickLabel', {
             labels,
-            contains: false,
             reveal: !!reveal
         }, frameScope);
         const hit = firstOk(rows);
@@ -48,7 +47,6 @@ async function selectQualityVerified(tabId, label, height, timeoutMs, preferredF
         const viaQuality = firstOk(await runQualityDom(tabId, 'clickQuality', {
             height: Number(height) || 0,
             label,
-            mode: 'click'
         }, frameScope));
         if (viaQuality?.value?.ok) {
             await sleep(250);
@@ -62,7 +60,6 @@ async function selectQualityVerified(tabId, label, height, timeoutMs, preferredF
 
         const viaLabel = firstOk(await runQualityDom(tabId, 'clickLabel', {
             labels: candidates,
-            contains: false,
             reveal: false
         }, frameScope));
         if (viaLabel?.value?.ok) {

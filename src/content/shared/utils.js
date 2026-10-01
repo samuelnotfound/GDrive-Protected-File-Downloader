@@ -64,22 +64,6 @@
         for (const media of mediaElements('video, audio')) muteMedia(media);
     }
 
-    function requestRuntime(message) {
-        return new Promise(resolve => {
-            try {
-                chrome.runtime.sendMessage(message, response => {
-                    if (chrome.runtime.lastError) {
-                        resolve({ success: false, error: chrome.runtime.lastError.message });
-                    } else {
-                        resolve(response || { success: false, error: 'No response.' });
-                    }
-                });
-            } catch (error) {
-                resolve({ success: false, error: error?.message || String(error) });
-            }
-        });
-    }
-
     async function waitUntil(check, timeoutMs, intervalMs = 25) {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
@@ -98,7 +82,6 @@
         areaOf,
         muteMedia,
         muteAllMedia,
-        requestRuntime,
         waitUntil
     });
 })();
