@@ -41,6 +41,8 @@ For files opened through Google Classroom, use **File → Open → Open in new t
 
 ## Issues
 - PDF quality looks blurry — Zoom the document to 200% (or higher) before capturing.
+- PDF capture did not complete - Do not exit from the current tab while capture is in progress.
+- Video download is extremly slow - Restart the download.
 - Other problems — A page refresh usually resolves them.
 
 ## Limitations
