@@ -642,7 +642,7 @@ const handleGetStreams = async ({ tabId }) => {
     const recentVideo = recent.filter(s => s?.url && !isAudioStream(s));
     const recentAudio = recent.filter(s => s?.url && isAudioStream(s));
 
-    // Ensure a minimal session object so the popup always has a place to read from.
+    // Ensure a minimal session object so the current Drive tab always has state to read from.
     if (!session) {
         session = {
             fileId: '',

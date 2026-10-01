@@ -86,7 +86,6 @@
     }
   ],
   "action": {
-    "default_title": "GDrive Protected File Downloader",
-    "default_popup": "src/popup/popup.html"
+    "default_title": "GDrive Protected File Downloader"
   }
 }
