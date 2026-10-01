@@ -67,8 +67,8 @@
         } else if (video.operation === 'scanning') {
             labelText = 'Reading qualities…';
         } else if (!ready) {
-            labelText = 'Play video first';
-            infoText = 'Start the video, then Download unlocks';
+            labelText = 'Download';
+            infoText = 'Play a video first to enable download.';
         }
 
         document.querySelectorAll('#' + VIDEO_MENU_ID).forEach(item => {
