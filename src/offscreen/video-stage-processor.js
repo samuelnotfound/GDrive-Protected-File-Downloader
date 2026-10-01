@@ -1,6 +1,6 @@
-
 (() => {
-    const downloader = window.GDriveVideoStreamDownloader;
+    const downloader = self.GDriveVideoStreamDownloader;
+    const storage = self.GDriveVideoStageStorage;
     const workers = new Map();
     const rejects = new Map();
 
@@ -25,7 +25,7 @@
         for (const id of workers.keys()) cancel(id);
     }
 
-    async function mergeStreams(job, videoBlob, audioBlob) {
+    async function mergeStreams(job, videoFile, audioFile) {
         const worker = new Worker(chrome.runtime.getURL('vendor/mp4-remux-worker.js'));
         workers.set(job.jobId, worker);
         try {
@@ -48,11 +48,7 @@
                         return;
                     }
                     if (data.type === 'done') {
-                        if (!(data.buffer instanceof ArrayBuffer)) {
-                            reject(new Error('FFmpeg returned an invalid MP4 buffer.'));
-                            return;
-                        }
-                        resolve(new Blob([data.buffer], { type: 'video/mp4' }));
+                        resolve(data);
                         return;
                     }
                     if (data.type === 'error') reject(new Error(data.message || 'FFmpeg failed.'));
@@ -60,8 +56,10 @@
                 worker.onerror = event => reject(new Error(event.message || 'FFmpeg worker failed.'));
                 worker.postMessage({
                     type: 'mux',
-                    video: videoBlob,
-                    audio: audioBlob,
+                    videoJobId: videoFile.jobId,
+                    videoLabel: videoFile.label,
+                    audioJobId: audioFile.jobId,
+                    audioLabel: audioFile.label,
                     audioCodec: getAudioCodec(job.audioUrl)
                 });
             });
@@ -72,8 +70,8 @@
         }
     }
 
-    async function triggerDownload(blob, filename, jobId) {
-        const url = URL.createObjectURL(blob);
+    async function triggerDownload(file, filename, jobId) {
+        const url = URL.createObjectURL(file);
         const link = document.createElement('a');
         link.href = url;
         link.download = filename;
@@ -83,26 +81,29 @@
         link.click();
         link.remove();
         downloader.postStageMessage('videoStageDownloadStarted', { jobId });
+        // The File object is a snapshot; source/output files can be removed
+        // from OPFS after the download URL has been created.
+        try { await storage.removeJob(jobId); } catch (_) {}
         setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
-    async function process(job, videoBlob, audioBlob) {
+    async function process(job, videoFile, audioFile) {
         downloader.throwIfCancelled(job.jobId);
-        const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
+        await mergeStreams(job, videoFile, audioFile);
         downloader.throwIfCancelled(job.jobId);
         downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing' });
-        await triggerDownload(mergedBlob, job.filename, job.jobId);
+        const mergedFile = await storage.getFile(job.jobId, 'merged', 'video/mp4');
+        await triggerDownload(mergedFile, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
     }
 
-    async function processSingle(job, mediaBlob) {
+    async function processSingle(job, mediaFile) {
         downloader.throwIfCancelled(job.jobId);
         downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing', message: 'Preparing selected quality…' });
-        const type = String(job.mediaMime || 'video/mp4').toLowerCase();
-        const blob = type.includes('mp4') ? mediaBlob : new Blob([mediaBlob], { type: type || 'video/mp4' });
-        await triggerDownload(blob, job.filename, job.jobId);
+        const file = await storage.getFile(job.jobId, mediaFile.label, job.mediaMime || 'video/mp4');
+        await triggerDownload(file, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
     }
 
-    window.GDriveVideoProcessor = { process, processSingle, cancel };
+    self.GDriveVideoProcessor = { process, processSingle, cancel };
 })();
