@@ -1,8 +1,17 @@
 function cleanURL(url) {
     if (!url) return null;
-    const value = String(url);
-    const rangeIndex = value.search(/[?&]range=/i);
-    return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
+    // Must remove ONLY the range param — not truncate the string at it. Signed
+    // Drive URLs put other required params (clen, mime, the signature itself)
+    // after range in the query string; a naive slice(0, rangeIndex) discards
+    // all of them, which breaks the request without ever raising an error
+    // here (the server just has an invalid URL to work with afterward).
+    try {
+        const parsed = new URL(String(url));
+        parsed.searchParams.delete('range');
+        return parsed.toString();
+    } catch (_) {
+        return String(url);
+    }
 }
 
 
