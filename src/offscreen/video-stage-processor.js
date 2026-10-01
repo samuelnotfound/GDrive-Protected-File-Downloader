@@ -3,6 +3,19 @@
     const storage = self.GDriveVideoStageStorage;
     const workers = new Map();
     const rejects = new Map();
+    let mergeQueueTail = Promise.resolve();
+
+    async function withMergeSlot(task) {
+        const previous = mergeQueueTail;
+        let release;
+        mergeQueueTail = new Promise(resolve => { release = resolve; });
+        await previous.catch(() => {});
+        try {
+            return await task();
+        } finally {
+            release();
+        }
+    }
 
     function getAudioCodec(url) {
         try {
@@ -25,7 +38,7 @@
         for (const id of workers.keys()) cancel(id);
     }
 
-    async function mergeStreams(job, videoFile, audioFile) {
+    async function mergeStreamsNow(job, videoFile, audioFile) {
         const worker = new Worker(chrome.runtime.getURL('vendor/mp4-remux-worker.js'));
         workers.set(job.jobId, worker);
         try {
@@ -70,28 +83,45 @@
         }
     }
 
+    async function mergeStreams(job, videoFile, audioFile) {
+        return await withMergeSlot(() => mergeStreamsNow(job, videoFile, audioFile));
+    }
+
     async function triggerDownload(file, filename, jobId) {
+        downloader.throwIfCancelled(jobId);
+        const fileSize = Number(file?.size) || 0;
+        downloader.postStageMessage('videoStageStatus', {
+            jobId,
+            stage: 'save',
+            message: fileSize > 0 ? 'Saving final file…' : 'Starting final download…',
+            fileBytes: fileSize
+        });
+
         const url = URL.createObjectURL(file);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        link.rel = 'noopener';
-        link.style.display = 'none';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        downloader.postStageMessage('videoStageDownloadStarted', { jobId });
-        // The File object is a snapshot; source/output files can be removed
-        // from OPFS after the download URL has been created.
+        try {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            link.rel = 'noopener';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            downloader.postStageMessage('videoStageDownloadStarted', { jobId, fileBytes: fileSize });
+        } finally {
+            // The File object remains usable after the URL is created. Revoke the
+            // object URL later to avoid keeping the browser-side handle alive.
+            setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        }
+
+        // Source/output OPFS files are now no longer needed by the extension.
         try { await storage.removeJob(jobId); } catch (_) {}
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
     async function process(job, videoFile, audioFile) {
         downloader.throwIfCancelled(job.jobId);
         await mergeStreams(job, videoFile, audioFile);
         downloader.throwIfCancelled(job.jobId);
-        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing' });
         const mergedFile = await storage.getFile(job.jobId, 'merged', 'video/mp4');
         await triggerDownload(mergedFile, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });
@@ -99,7 +129,7 @@
 
     async function processSingle(job, mediaFile) {
         downloader.throwIfCancelled(job.jobId);
-        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing', message: 'Preparing selected quality…' });
+        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'save', message: 'Preparing final file…' });
         const file = await storage.getFile(job.jobId, mediaFile.label, job.mediaMime || 'video/mp4');
         await triggerDownload(file, job.filename, job.jobId);
         downloader.postStageMessage('videoStageFinished', { jobId: job.jobId });

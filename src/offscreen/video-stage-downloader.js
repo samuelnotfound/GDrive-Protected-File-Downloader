@@ -4,6 +4,7 @@
     const jobControllers = new Map();
     const cancelledJobs = new Set();
     const activeRuns = new Map();
+    const activeWriters = new Map();
 
     function postStageMessage(type, payload = {}) {
         try {
@@ -72,6 +73,7 @@
     async function fetchToTempFile(url, label, jobId, signal, expectedTotal = 0) {
         const baseUrl = cleanStageURL(url);
         let writer = await storage.openWriter(jobId, label);
+        activeWriters.set(`${jobId}:${label}`, writer);
         let writerClosed = false;
         let received = 0;
         let total = Math.max(0, Number(expectedTotal) || 0);
@@ -95,6 +97,7 @@
                 try { await writer.close(); } catch (_) {}
             }
             writer = await storage.openWriter(jobId, label);
+            activeWriters.set(`${jobId}:${label}`, writer);
             writerClosed = false;
             received = 0;
             responseBytes = 0;
@@ -205,6 +208,7 @@
 
             await writer.close();
             writerClosed = true;
+            activeWriters.delete(`${jobId}:${label}`);
             const size = await storage.getSize(jobId, label);
             if (total > 0 && size < total) {
                 throw new Error(`${label} stream ended early (${formatStageBytes(size)} / ${formatStageBytes(total)}).`);
@@ -222,6 +226,7 @@
             if (!writerClosed) {
                 try { await writer.abort(); } catch (_) {}
             }
+            activeWriters.delete(`${jobId}:${label}`);
             throw error;
         }
     }
@@ -255,6 +260,12 @@
         if (jobId) cancelledJobs.add(jobId);
         const controller = jobControllers.get(jobId);
         try { controller?.abort(); } catch (_) {}
+        for (const [key, writer] of activeWriters) {
+            if (!jobId || key.startsWith(`${jobId}:`)) {
+                try { writer?.abort?.(); } catch (_) {}
+                activeWriters.delete(key);
+            }
+        }
         try { window.GDriveVideoProcessor?.cancel(jobId); } catch (_) {}
     }
 
@@ -312,6 +323,12 @@
         if (message?.target !== 'video-offscreen') return;
         if (message.type === 'videoStageStart') run(message.jobId);
         if (message.type === 'videoStageCancelInternal') cancel(message.jobId);
+        if (message.type === 'videoStageCleanup') {
+            void storage.cleanupStaleJobs(
+                Number(message.maxAgeMs) || 2 * 60 * 60 * 1000,
+                message.protectedJobIds || []
+            ).catch(() => {});
+        }
     });
 
     self[NS] = {

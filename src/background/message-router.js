@@ -619,7 +619,7 @@ async function handleClearTabCaptureState({ tabId }) {
                 if (typeof GLOBAL_LAST_AUDIO !== 'undefined') GLOBAL_LAST_AUDIO = null;
                 if (typeof GLOBAL_LAST_VIDEO !== 'undefined') GLOBAL_LAST_VIDEO = null;
             } catch (_) {}
-            try { await chrome.storage.local.remove(['psdGlobalStreams']); } catch (_) {}
+            try { await chrome.storage.session.remove(['psdGlobalStreams']); } catch (_) {}
         }
     } catch (_) {}
     return { success: true };

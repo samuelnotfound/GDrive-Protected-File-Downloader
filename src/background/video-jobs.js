@@ -6,6 +6,8 @@ let offscreenLock = Promise.resolve();
 let offscreenGeneration = 0;
 
 async function ensureVideoOffscreen() {
+    const protectedJobIds = Object.keys(await getStoredJobs().catch(() => ({})));
+    const requestCleanup = () => sendOffscreen({ type: 'videoStageCleanup', protectedJobIds });
     const myGen = ++offscreenGeneration;
     const run = offscreenLock.then(async () => {
         if (myGen !== offscreenGeneration) return; // superseded
@@ -15,7 +17,10 @@ async function ensureVideoOffscreen() {
                 const contexts = await chrome.runtime.getContexts({
                     contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [url]
                 });
-                if (contexts.length) return;
+                if (contexts.length) {
+                    requestCleanup();
+                    return;
+                }
             } catch (_) {}
         }
         try {
@@ -27,9 +32,13 @@ async function ensureVideoOffscreen() {
         } catch (error) {
             const msg = String(error?.message || error || '');
             // Chrome wording varies: "already exists", "Only a single offscreen document", etc.
-            if (/already exists|single offscreen|only one offscreen/i.test(msg)) return;
+            if (/already exists|single offscreen|only one offscreen/i.test(msg)) {
+                requestCleanup();
+                return;
+            }
             throw error;
         }
+        requestCleanup();
     });
     offscreenLock = run.catch(() => {});
     return run;

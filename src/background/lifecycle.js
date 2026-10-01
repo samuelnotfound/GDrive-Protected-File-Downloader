@@ -54,7 +54,7 @@ async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {
     if (clearGlobal) {
         try {
             if (typeof clearGlobalStreams === 'function') clearGlobalStreams();
-            else await chrome.storage.local.remove(['psdGlobalStreams']);
+            else await chrome.storage.session.remove(['psdGlobalStreams']);
         } catch (_) {}
     }
 
@@ -154,3 +154,24 @@ chrome.tabs.onRemoved.addListener(tabId => {
     TAB_URL_BY_ID.delete(tabId);
     clearTabMediaState(tabId, { clearGlobal: true });
 });
+
+
+// Reap recent orphaned OPFS staging directories after a browser restart.
+// This does not touch active in-session jobs because ensureVideoOffscreen sends
+// their IDs as protected entries.
+try {
+    chrome.runtime.onStartup.addListener(() => {
+        void (async () => {
+            try {
+                const jobs = await getStoredJobs();
+                await ensureVideoOffscreen();
+                await sendOffscreen({
+                    type: 'videoStageCleanup',
+                    maxAgeMs: 10 * 60 * 1000,
+                    protectedJobIds: Object.keys(jobs || {})
+                });
+                setTimeout(() => { void closeVideoOffscreen(); }, 500);
+            } catch (_) {}
+        })();
+    });
+} catch (_) {}
