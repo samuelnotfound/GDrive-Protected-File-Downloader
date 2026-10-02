@@ -39,11 +39,30 @@ Support for additional file types is currently unplanned.
 
 For files opened through Google Classroom, use **File → Open → Open in new tab** first, then use the Google Drive **File** menu.
 
-## Issues
-- PDF quality looks blurry — Zoom the document to 200% (or higher) before capturing.
-- PDF capture did not complete - Do not exit from the current tab while capture is in progress.
-- Video download is extremly slow - Restart the download.
-- Other problems — A page refresh usually resolves them.
+## Known Issues
+
+* PDF quality may appear blurry — Zoom the document to 200% or higher before capturing it for better quality.
+* PDF capture may not complete — Do not close or leave the current tab while a capture is in progress.
+* Video downloads may be extremely slow or fail — Refresh the current tab and try the download again.
+* Video downloads may get stuck retrying — Your internet connection may be too slow for the download-speed detection to reliably determine whether the speed-up workaround is working.
+
+### About the Video Download Workaround
+The extension uses a somewhat unconventional workaround to improve video download speeds. It monitors the download speed to determine whether the workaround is actually helping, since a normal download can sometimes become extremely slow—down to only a few KB/s.
+
+If the extension detects that the workaround may not have worked on the first attempt, it automatically retries until it determines that the download is working properly.
+
+However, on a slow or unstable internet connection, it can be difficult for the extension to distinguish between:
+
+* the speed-up workaround failing, and
+* the user’s internet connection simply being slow.
+
+This can cause the download to retry repeatedly.
+
+### Other Issues
+
+For other unexpected problems, refreshing the current tab usually resolves them.
+
+This is an experimental program and, like many experimental projects, it may still contain bugs and unexpected behavior. The current version was originally developed with AI assistance and contains some messy, overly complicated code. I plan to simplify and clean up the codebase in the future, but until then, this application is being provided as-is.
 
 ## Limitations
 
