@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Current Media</title>
+  <style>
+    body { font: 13px system-ui, sans-serif; width: 560px; margin: 12px; }
+    .row { margin: 10px 0 14px; }
+    .label { font-weight: 600; margin-bottom: 4px; }
+    .meta { margin: 4px 0; font: 12px ui-monospace, monospace; }
+    textarea { width: 100%; height: 76px; box-sizing: border-box; font: 11px ui-monospace, monospace; }
+    button { margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div class="label">Current stream</div>
+    <div id="mode" class="meta">Stream: —</div>
+    <div id="videoMeta" class="meta">Video itag: —</div>
+    <div id="audioMeta" class="meta">Audio itag: —</div>
+    <textarea id="video" readonly></textarea>
+    <button data-copy="video">Copy video URL</button>
+  </div>
+
+  <div class="row">
+    <div class="label">Audio stream</div>
+    <div id="audioStatus" class="meta">—</div>
+    <textarea id="audio" readonly></textarea>
+    <button data-copy="audio">Copy audio URL</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
