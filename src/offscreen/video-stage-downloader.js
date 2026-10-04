@@ -26,62 +26,22 @@
         });
     }
 
-    // Match salauddinn / common Drive fixes: strip range (and pot) so the
-    // server serves the full stream instead of a tiny player segment.
-    function cleanStageURL(url) {
+    function makeFullRangeURL(url) {
         if (!url) return url;
         try {
             const parsed = new URL(url);
-            parsed.searchParams.delete('range');
-            // pot / cver can cause short or rejected responses outside the player.
-            parsed.searchParams.delete('pot');
-            parsed.searchParams.delete('cver');
+            const clen = Number(parsed.searchParams.get('clen'));
+            if (Number.isSafeInteger(clen) && clen > 0) parsed.searchParams.set('range', `0-${clen - 1}`);
             return parsed.toString();
-        } catch (_) {
-            // Fallback: cut at &range= / ?range= like salauddinn does.
-            const value = String(url);
-            const rangeIndex = value.search(/[?&]range=/i);
-            return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
-        }
+        } catch (_) { return url; }
     }
-
-    function makeRangeURL(url, start, end) {
-        if (!url) return url;
-        try {
-            const parsed = new URL(url);
-            parsed.searchParams.set('range', `${start}-${end}`);
-            return parsed.toString();
-        } catch (_) {
-            return url;
-        }
-    }
-
-    function clenFromUrl(url) {
-        try {
-            const n = Number(new URL(url).searchParams.get('clen'));
-            return Number.isSafeInteger(n) && n > 0 ? n : 0;
-        } catch (_) {
-            return 0;
-        }
-    }
-
-    const DRIVE_FETCH_HEADERS = {
-        // Helps Google treat the request more like the player / browser download.
-        Referer: 'https://drive.google.com/',
-        Origin: 'https://drive.google.com'
-    };
-
-    // Prefer modest chunk sizes — full-file range=0-clen-1 often returns only
-    // a few KB from Drive when requested outside the player context.
-    const RANGE_CHUNK = 8 * 1024 * 1024; // 8 MiB
 
     async function fetchToBlob(url, label, jobId, signal, expectedTotal = 0) {
         const baseUrl = cleanStageURL(url);
         const parts = [];
         let received = 0;
-        let total = Math.max(0, Number(expectedTotal) || 0, clenFromUrl(baseUrl));
+        let total = Math.max(0, Number(expectedTotal) || 0);
         let lastReport = 0;
-        let contentType = '';
 
         async function readResponse(response, rangeStart = 0) {
             const contentRange = response.headers.get('content-range') || '';
@@ -90,12 +50,6 @@
                 ? Number(rangeMatch[3])
                 : 0;
             if (responseTotal > 0) total = Math.max(total, responseTotal);
-
-            // Prefer real Content-Length when no Content-Range (full 200 body).
-            if (!rangeMatch) {
-                const cl = Number(response.headers.get('content-length'));
-                if (Number.isSafeInteger(cl) && cl > 0) total = Math.max(total, cl);
-            }
 
             const responseStart = rangeMatch ? Number(rangeMatch[1]) : rangeStart;
             const responseEnd = rangeMatch ? Number(rangeMatch[2]) : 0;
@@ -132,11 +86,8 @@
                 }
             }
 
-            const type = response.headers.get('content-type') || '';
-            if (type) contentType = type;
-
             return {
-                blob: new Blob(chunks, { type: type || contentType || '' }),
+                blob: new Blob(chunks, { type: response.headers.get('content-type') || '' }),
                 bytes: responseBytes,
                 start: responseStart,
                 end: responseEnd,
@@ -145,17 +96,15 @@
             };
         }
 
-        // 1) First request: plain cleaned URL (NO forced range=0-clen-1).
-        //    Forcing a full-file range is what produces the "1.2 KB / 83.6 MB" failure.
-        const firstResponse = await fetch(baseUrl, {
+        // First request keeps the existing Drive behavior. Some Drive responses
+        // can be only a tiny partial response even though the URL's clen says
+        // the stream is much larger. Never treat that short response as complete.
+        const firstResponse = await fetch(makeFullRangeURL(baseUrl), {
             credentials: 'include',
             cache: 'no-store',
-            signal,
-            headers: { ...DRIVE_FETCH_HEADERS }
+            signal
         });
-        if (!firstResponse.ok) {
-            throw new Error(`${label} request failed (${firstResponse.status})`);
-        }
+        if (!firstResponse.ok) throw new Error(`${label} request failed (${firstResponse.status})`);
 
         const first = await readResponse(firstResponse, 0);
         if (first.bytes > 0) {
@@ -163,110 +112,63 @@
             received += first.bytes;
         }
 
-        // If server already sent everything (200 + body matches total, or no total known), done.
-        const firstLooksComplete =
-            (total > 0 && received >= total) ||
-            (total === 0 && first.bytes > 0 && firstResponse.status === 200 && !first.contentRange);
-
-        if (firstLooksComplete) {
-            const blob = new Blob(parts, { type: contentType || '' });
-            await postStageMessage('videoStageProgress', {
-                jobId,
-                label,
-                received: blob.size,
-                total: total || blob.size
-            });
-            return blob;
-        }
-
-        // 2) Need more bytes → request remaining data in chunks (Range header + ?range=).
-        //    Use modest chunk size so Drive is less likely to short-circuit.
+        // If the first response was a genuine full response, we're done. If it
+        // was partial, continue from the exact next byte using both an HTTP Range
+        // header and a matching ?range= query parameter.
         if (total > 0 && received < total) {
             let attempts = 0;
-            let emptyStreak = 0;
-            while (received < total && attempts++ < 256) {
+            while (received < total && attempts++ < 128) {
                 const rangeStart = received;
-                const rangeEnd = Math.min(total - 1, rangeStart + RANGE_CHUNK - 1);
+                const rangeEnd = total - 1;
                 const rangeUrl = makeRangeURL(baseUrl, rangeStart, rangeEnd);
                 const response = await fetch(rangeUrl, {
                     credentials: 'include',
                     cache: 'no-store',
                     signal,
                     headers: {
-                        ...DRIVE_FETCH_HEADERS,
                         Range: `bytes=${rangeStart}-${rangeEnd}`
                     }
                 });
-
-                // 416 / 4xx on range: stop if we already have a usable amount.
-                if (!response.ok) {
-                    if (received > 0 && response.status === 416) break;
-                    throw new Error(`${label} range request failed (${response.status})`);
-                }
+                if (!response.ok) throw new Error(`${label} range request failed (${response.status})`);
 
                 const part = await readResponse(response, rangeStart);
                 if (part.bytes <= 0) {
-                    emptyStreak += 1;
-                    if (emptyStreak >= 3) {
-                        throw new Error(
-                            `${label} stream ended early (${formatStageBytes(received)} / ${formatStageBytes(total)}).`
-                        );
-                    }
-                    continue;
+                    throw new Error(`${label} stream ended early (${formatStageBytes(received)} / ${formatStageBytes(total)}).`);
                 }
-                emptyStreak = 0;
 
-                // Server ignored Range and returned a full 200 body.
+                // A server that ignores a non-zero Range request may return the
+                // entire file with 200. Use that full response as the file rather
+                // than appending it to the small first response.
                 if (response.status === 200 && !part.contentRange) {
-                    if (part.bytes >= total || part.bytes > received) {
+                    if (part.bytes >= total) {
                         parts.length = 0;
                         parts.push(part.blob);
                         received = part.bytes;
                         break;
                     }
-                    // Tiny 200 while we expected much more — treat as failure.
-                    if (part.bytes < 64 * 1024 && total > 1024 * 1024) {
-                        throw new Error(
-                            `${label} stream ended early (${formatStageBytes(part.bytes)} / ${formatStageBytes(total)}).`
-                        );
-                    }
+                    throw new Error(`${label} stream ended early (${formatStageBytes(received)} / ${formatStageBytes(total)}).`);
                 }
 
                 if (part.contentRange && part.start !== rangeStart) {
-                    // Server started at a different offset; only accept if it continues past us.
-                    if (part.start > rangeStart) {
-                        throw new Error(`${label} returned an unexpected byte range.`);
-                    }
-                    // Overlap: skip already-received prefix (rare).
-                    if (part.start < rangeStart && part.bytes > (rangeStart - part.start)) {
-                        // Simplified: just append; slight overlap is rare and remux tolerates better than abort.
-                    }
+                    throw new Error(`${label} returned an unexpected byte range.`);
                 }
 
                 parts.push(part.blob);
                 received += part.bytes;
-
-                // Progress already reported inside readResponse.
             }
         }
 
-        // Soft completeness: allow a small shortfall (Drive sometimes under-reports).
-        const shortfall = total > 0 ? total - received : 0;
-        const softOk = total > 0 && received > 0 && shortfall <= Math.max(4096, total * 0.002);
-
-        if (total > 0 && received < total && !softOk) {
-            throw new Error(
-                `${label} stream ended early (${formatStageBytes(received)} / ${formatStageBytes(total)}).`
-            );
+        if (total > 0 && received < total) {
+            throw new Error(`${label} stream ended early (${formatStageBytes(received)} / ${formatStageBytes(total)}).`);
         }
 
-        const blob = new Blob(parts, { type: contentType || '' });
-        if (total > 0 && blob.size < total && !softOk) {
-            throw new Error(
-                `${label} stream ended early (${formatStageBytes(blob.size)} / ${formatStageBytes(total)}).`
-            );
+        const blob = new Blob(parts, { type: firstResponse.headers.get('content-type') || '' });
+        if (total > 0 && blob.size < total) {
+            throw new Error(`${label} stream ended early (${formatStageBytes(blob.size)} / ${formatStageBytes(total)}).`);
         }
 
+        // This final message is awaited so processing cannot start before the
+        // overlay has seen the true end of this stream.
         await postStageMessage('videoStageProgress', {
             jobId,
             label,
@@ -274,6 +176,28 @@
             total: total || blob.size
         });
         return blob;
+    }
+
+    function makeRangeURL(url, start, end) {
+        if (!url) return url;
+        try {
+            const parsed = new URL(url);
+            parsed.searchParams.set('range', `${start}-${end}`);
+            return parsed.toString();
+        } catch (_) {
+            return url;
+        }
+    }
+
+    function cleanStageURL(url) {
+        if (!url) return url;
+        try {
+            const parsed = new URL(url);
+            parsed.searchParams.delete('range');
+            return parsed.toString();
+        } catch (_) {
+            return url;
+        }
     }
 
     function formatStageBytes(bytes) {

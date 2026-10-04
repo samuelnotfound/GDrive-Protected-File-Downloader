@@ -1,18 +1,8 @@
 function cleanURL(url) {
     if (!url) return null;
-    try {
-        const parsed = new URL(String(url));
-        // Same cleaning as salauddinn / offscreen downloader: remove player-only
-        // params so the full stream is requested instead of a tiny segment.
-        parsed.searchParams.delete('range');
-        parsed.searchParams.delete('pot');
-        parsed.searchParams.delete('cver');
-        return parsed.toString();
-    } catch (_) {
-        const value = String(url);
-        const rangeIndex = value.search(/[?&]range=/i);
-        return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
-    }
+    const value = String(url);
+    const rangeIndex = value.search(/[?&]range=/i);
+    return rangeIndex === -1 ? value : value.slice(0, rangeIndex);
 }
 
 
