@@ -266,9 +266,7 @@
     }
 
     function muteMediaImmediately() {
-        try { utils.muteAllMedia(); } catch (_) {}
-        try { window.postMessage({ type: 'PSD_MEDIA_MUTE_NOW' }, '*'); } catch (_) {}
-        void sendRuntime({ action: 'muteMediaNow' });
+        // Auto-mute disabled per user request
     }
 
     function setVideoPlaybackStarted(started = true) {

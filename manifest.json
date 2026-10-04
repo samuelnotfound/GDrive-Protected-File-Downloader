@@ -34,8 +34,7 @@
         "<all_urls>"
       ],
       "js": [
-        "src/content/media/network-bridge.js",
-        "src/content/media/media-mute-guard.js"
+        "src/content/media/network-bridge.js"
       ],
       "run_at": "document_start",
       "all_frames": true,

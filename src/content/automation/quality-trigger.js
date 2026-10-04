@@ -35,31 +35,137 @@
     return (pool || elements()).find(el => descriptor(el).some(v => wanted.includes(v))) || null;
   }
 
-  function clickHuman(el) {
+  // ---- Prototype-style DOM find + full pointer press (menu + quality changer) ----
+  const visibleEl = (el) => {
+    try {
+      if (typeof el.checkVisibility === 'function') {
+        return el.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true });
+      }
+    } catch (_) {}
+    return isVisible(el);
+  };
+
+  const ownText = (el) =>
+    [...(el?.childNodes || [])]
+      .filter((n) => n.nodeType === 3)
+      .map((n) => n.nodeValue)
+      .join('')
+      .trim();
+
+  // Visible elements whose *own* text passes `test` (skips long JSON/script blobs).
+  const findAllByOwnText = (test) => {
+    const found = [];
+    try {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node; (node = walker.nextNode()); ) {
+        if (node.nodeValue.length > 80) continue;
+        const el = node.parentElement;
+        if (!el || isOwnUi(el)) continue;
+        const t = node.nodeValue.trim();
+        if (test(t) && visibleEl(el)) found.push(el);
+      }
+    } catch (_) {}
+    return found;
+  };
+
+  const findQualityItem = () => findAllByOwnText((t) => t === 'Quality')[0] || null;
+
+  const findOption = (quality, qualityItem) => {
+    const row = qualityItem?.closest?.('[role^=menuitem], [role=option], li');
+    const pick = (test) =>
+      findAllByOwnText(test).filter((el) => !row?.contains?.(el)).at(-1) || null;
+    const q = String(quality || '').trim();
+    return pick((t) => t === q) || pick((t) => t.startsWith(q));
+  };
+
+  const waitFor = (find, { ms = 2000, giveUp } = {}) =>
+    new Promise((resolve) => {
+      let frame = 0;
+      const observer = new MutationObserver(() => {
+        frame ||= requestAnimationFrame(check);
+      });
+      const timer = setTimeout(() => done(find()), ms);
+      const done = (value) => {
+        cancelAnimationFrame(frame);
+        clearTimeout(timer);
+        try { observer.disconnect(); } catch (_) {}
+        resolve(value);
+      };
+      const check = () => {
+        frame = 0;
+        const el = find();
+        if (el || giveUp?.()) done(el);
+      };
+      try {
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'aria-expanded'],
+        });
+      } catch (_) {}
+      check();
+    });
+
+  /**
+   * Full hover → down → up → click at element centre, aimed at whatever is
+   * actually on top there (wrapper inner button). Matches quality-changer press().
+   */
+  function press(el) {
     if (!el) return false;
     try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-    try { el.focus?.({ preventScroll: true }); } catch (_) {}
-    try { el.click(); return true; } catch (_) {}
-    return dispatchClick(el);
-  }
-
-  function dispatchClick(el) {
-    if (!el) return false;
-    let x = 0, y = 0;
-    try { const r = el.getBoundingClientRect(); x = r.left + r.width / 2; y = r.top + r.height / 2; } catch (_) {}
-    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0 };
-    for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    let left = 0, top = 0, width = 0, height = 0;
+    try {
+      const r = el.getBoundingClientRect();
+      left = r.left; top = r.top; width = r.width; height = r.height;
+    } catch (_) {}
+    const x = left + width / 2;
+    const y = top + height / 2;
+    let target = el;
+    try {
+      const hit = document.elementFromPoint(x, y);
+      if (hit && el.contains(hit)) target = hit;
+    } catch (_) {}
+    const fire = (Type, type, init) => {
       try {
-        const Ctor = type.startsWith('pointer') && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
-        const extra = Ctor === MouseEvent ? {} : { pointerId: 1, pointerType: 'mouse', isPrimary: true };
-        el.dispatchEvent(new Ctor(type, { ...base, ...extra, buttons: type.includes('down') ? 1 : 0 }));
+        target.dispatchEvent(
+          new Type(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true,
+            ...init,
+          })
+        );
       } catch (_) {}
-    }
+    };
+    fire(PointerEvent, 'pointerover');
+    fire(MouseEvent, 'mouseover');
+    fire(PointerEvent, 'pointermove');
+    fire(MouseEvent, 'mousemove');
+    fire(PointerEvent, 'pointerdown', { buttons: 1 });
+    fire(MouseEvent, 'mousedown', { buttons: 1 });
+    fire(PointerEvent, 'pointerup');
+    fire(MouseEvent, 'mouseup');
+    fire(MouseEvent, 'click', { detail: 1 });
     return true;
   }
 
+  // Prefer prototype press; keep name clickHuman for existing call sites.
+  function clickHuman(el) {
+    if (!el) return false;
+    try { el.focus?.({ preventScroll: true }); } catch (_) {}
+    return press(el);
+  }
+
   function muteAllMediaNow() {
-    for (const media of mediaElements('video, audio')) muteMedia(media);
+    // Auto-mute disabled per user request
   }
 
   let muteGuardCleanup = null;
@@ -75,58 +181,11 @@
   let muteGuardAutoTimer = null;
 
   function enableMuteGuard() {
-    if (muteGuardCleanup) {
-      // Refresh auto-release deadline on repeated enable.
-      if (muteGuardAutoTimer) clearTimeout(muteGuardAutoTimer);
-      muteGuardAutoTimer = setTimeout(() => { try { releaseMuteGuard(); } catch (_) {} }, MUTE_GUARD_MAX_MS);
-      return;
-    }
-    setMainWorldMuteGuard(true);
-
-    const boundRoots = new Set();
-    const mutePlayback = event => {
-      if (event?.target?.tagName === 'VIDEO') muteMedia(event.target);
-    };
-
-    const bindRoots = () => {
-      for (const root of allRoots()) {
-        if (boundRoots.has(root)) continue;
-        try {
-          root.addEventListener('play', mutePlayback, true);
-          root.addEventListener('playing', mutePlayback, true);
-          root.addEventListener('volumechange', mutePlayback, true);
-          boundRoots.add(root);
-        } catch (_) {}
-      }
-      for (const video of mediaElements('video')) muteMedia(video);
-    };
-
-    bindRoots();
-    const observer = new MutationObserver(bindRoots);
-    observer.observe(document.documentElement || document, { subtree: true, childList: true });
-
-    muteGuardCleanup = () => {
-      for (const root of boundRoots) {
-        try {
-          root.removeEventListener('play', mutePlayback, true);
-          root.removeEventListener('playing', mutePlayback, true);
-          root.removeEventListener('volumechange', mutePlayback, true);
-        } catch (_) {}
-      }
-      observer.disconnect();
-      muteGuardCleanup = null;
-    };
-    if (muteGuardAutoTimer) clearTimeout(muteGuardAutoTimer);
-    muteGuardAutoTimer = setTimeout(() => { try { releaseMuteGuard(); } catch (_) {} }, MUTE_GUARD_MAX_MS);
+    // Auto-mute disabled per user request
   }
 
   function releaseMuteGuard() {
-    if (muteGuardAutoTimer) {
-      clearTimeout(muteGuardAutoTimer);
-      muteGuardAutoTimer = null;
-    }
-    muteGuardCleanup?.();
-    setMainWorldMuteGuard(false);
+    // Auto-mute disabled per user request
   }
 
   function biggestVideo() {
@@ -249,50 +308,100 @@
       };
     },
 
-    clickQuality: ({ height = 0, label = '' } = {}) => {
+    // Full gear → Quality → resolution click, matching the quality-changer prototype.
+    // Async so waitFor can settle menus between presses.
+    clickQuality: async ({ height = 0, label = '' } = {}) => {
       const wantedHeight = Number(height) || heightOfLabel(label);
-      const names = label ? [label, `${label} resolution`, `${label} quality`]
-        : [`${wantedHeight}p`, `${wantedHeight}p resolution`, `${wantedHeight}p quality`];
+      const qualityText = String(label || (wantedHeight ? `${wantedHeight}p` : '')).trim();
+      if (!qualityText && !wantedHeight) {
+        return { ok: false, found: false, reason: 'No quality label or height provided.' };
+      }
 
-      let el = findExact(names, qualityPool());
-      if (!el) {
+      // If Quality submenu is already open, just press the option.
+      let qualityItem = findQualityItem();
+      if (!qualityItem) {
+        // Open Settings gear, then wait for Quality row (up to a few tries).
+        for (let attempt = 0; attempt < 4 && !qualityItem; attempt++) {
+          const gears = [...document.querySelectorAll('[aria-label="Settings"]')];
+          const gear = gears.find(visibleEl) || gears[0];
+          if (!gear) break;
+          press(gear);
+          qualityItem = await waitFor(findQualityItem, { ms: attempt === 0 ? 500 : 700 });
+          if (!qualityItem) {
+            qualityItem = await waitFor(findQualityItem, { ms: 150 });
+          }
+        }
+      }
+
+      if (!qualityItem) {
+        // Fallback: old path — find option directly if submenu already open via background.
+        const names = label
+          ? [label, `${label} resolution`, `${label} quality`]
+          : [`${wantedHeight}p`, `${wantedHeight}p resolution`, `${wantedHeight}p quality`];
+        let el = findExact(names, qualityPool());
+        if (!el) {
+          const matching = qualityRows().filter(row => row.height === wantedHeight);
+          matching.sort((a, b) => {
+            const rank = r => (r.role === 'menuitemradio' ? 0 : r.role === 'menuitem' ? 1 : r.role === 'option' ? 2 : 3);
+            return rank(a) - rank(b) || a.area - b.area;
+          });
+          el = matching[0]?.el || null;
+        }
+        if (!el) {
+          return { ok: false, found: false, reason: `${qualityText || wantedHeight + 'p'} is not listed in this frame.` };
+        }
+        const done = press(el);
+        return {
+          ok: !!done,
+          found: true,
+          label: labelOf(el).slice(0, 60),
+          height: wantedHeight,
+          method: 'direct-option'
+        };
+      }
+
+      // Press Quality, wait for the resolution option, press it.
+      press(qualityItem);
+      const optionText = qualityText || `${wantedHeight}p`;
+      let option = await waitFor(() => findOption(optionText, qualityItem), { ms: 2000 });
+      if (!option && wantedHeight) {
+        option = await waitFor(() => findOption(`${wantedHeight}p`, qualityItem), { ms: 800 });
+      }
+      // Also try matching by height via qualityRows if own-text miss.
+      if (!option && wantedHeight) {
         const matching = qualityRows().filter(row => row.height === wantedHeight);
         matching.sort((a, b) => {
-          const rank = r => r.role === 'menuitemradio' ? 0 : r.role === 'menuitem' ? 1 : r.role === 'option' ? 2 : 3;
+          const rank = r => (r.role === 'menuitemradio' ? 0 : r.role === 'menuitem' ? 1 : r.role === 'option' ? 2 : 3);
           return rank(a) - rank(b) || a.area - b.area;
         });
-        el = matching[0]?.el || null;
+        option = matching[0]?.el || null;
       }
-      if (!el) return { ok: false, found: false, reason: `${wantedHeight}p is not listed in this frame.` };
-
-      // Fire exactly one click sequence. Native .click() first; only fall back to
-      // a full synthetic pointer/mouse sequence when native click throws.
-      const done = clickHuman(el);
-
-      // aria-checked is updated asynchronously by Drive — do not treat a same-tick
-      // read as authoritative. Callers should rely on ok/found, not selected.
-      const selected = el.getAttribute('aria-checked') === 'true'
-        || el.getAttribute('aria-selected') === 'true'
-        || el.getAttribute('aria-current') === 'true';
+      if (!option) {
+        return {
+          ok: false,
+          found: false,
+          reason: `Opened Quality but could not find ${optionText}.`,
+          method: 'setQuality'
+        };
+      }
+      press(option);
       return {
-        ok: !!done,
+        ok: true,
         found: true,
-        label: labelOf(el).slice(0, 60),
-        selected, // best-effort snapshot only; may lag Drive's own handlers
+        label: (ownText(option) || labelOf(option) || optionText).slice(0, 60),
         height: wantedHeight,
-        wasAlreadySelected: selected
+        method: 'setQuality'
       };
     },
 
     // After a quality switch, nudge currentTime so the player must fetch a new
     // media segment for the newly selected itag instead of reusing the buffer.
     nudgePlayback: ({ seconds = 0.35 } = {}) => {
-      enableMuteGuard();
+      // Auto-mute disabled; still nudge playback to force segment fetch.
       let nudged = false;
       const step = Math.max(0.25, Number(seconds) || 0.35);
       for (const v of mediaElements('video')) {
         try {
-          muteMedia(v);
           const duration = Number(v.duration);
           const current = Number(v.currentTime || 0);
           if (Number.isFinite(duration) && duration > 1) {
@@ -329,11 +438,10 @@
     },
 
     resumePlayback: () => {
-      enableMuteGuard();
+      // Auto-mute disabled
       const videos = mediaElements('video');
       for (const v of videos) {
         try {
-          muteMedia(v);
           if (v.paused) { const p = v.play(); if (p?.catch) p.catch(() => {}); }
         } catch (_) {}
       }

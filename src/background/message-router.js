@@ -412,42 +412,51 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
         try {
             await runQualityDom(tabId, 'enableMuteGuard');
 
-            // Same as Drive Quality Trigger applyQuality:
-            // Settings → Quality → click the exact label the user picked.
-            const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
-            const QUALITY = ['quality', 'video quality', 'quality settings'];
+            // Quality selection mirrors the quality-changer prototype:
+            // press(Settings gear) → press(Quality) → press(resolution option)
+            // via content-script clickQuality (full pointer sequence + own-text find).
             const clickAt = Date.now();
+            const names = [label, `${label} resolution`, `${label} quality`, height ? `${height}p` : '']
+                .filter(Boolean);
 
             await closePlayerMenu(tabId);
             await sleep(120);
             try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+            await sleep(150);
 
-            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 7000, true);
-            if (!settings?.ok) {
-                return { success: false, error: settings?.reason || 'Could not open Settings.' };
-            }
-            await sleep(400);
-
-            const quality = await clickMenuLikeMini(
-                tabId, QUALITY, 'Quality', 7000, false,
-                Number.isInteger(settings.frameId) ? settings.frameId : null
+            // Primary: one-shot setQuality-style clickQuality in the page.
+            let selected = await selectQualityVerified(
+                tabId, label || `${height}p`, height, 9000, null
             );
-            if (!quality?.ok) {
-                return { success: false, error: quality?.reason || 'Could not open Quality menu.' };
-            }
-            await sleep(350);
 
-            // Click the exact menu label (e.g. "720p", "720p HD").
-            const names = [label, `${label} resolution`, `${label} quality`, height ? `${height}p` : '']
-                .filter(Boolean);
-            const selected = await selectQualityVerified(
-                tabId, label || `${height}p`, height, 7000,
-                Number.isInteger(quality.frameId) ? quality.frameId : (Number.isInteger(settings.frameId) ? settings.frameId : null)
-            );
+            // Fallback: explicit Settings → Quality → label (older path).
             if (!selected?.ok) {
-                // Fallback: clickLabel with candidates
+                const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
+                const QUALITY = ['quality', 'video quality', 'quality settings'];
+                await closePlayerMenu(tabId);
+                await sleep(100);
+                try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
+                const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 7000, true);
+                if (settings?.ok) {
+                    await sleep(350);
+                    const quality = await clickMenuLikeMini(
+                        tabId, QUALITY, 'Quality', 7000, false,
+                        Number.isInteger(settings.frameId) ? settings.frameId : null
+                    );
+                    if (quality?.ok) {
+                        await sleep(300);
+                        selected = await selectQualityVerified(
+                            tabId, label || `${height}p`, height, 7000,
+                            Number.isInteger(quality.frameId) ? quality.frameId
+                                : (Number.isInteger(settings.frameId) ? settings.frameId : null)
+                        );
+                    }
+                }
+            }
+
+            if (!selected?.ok) {
                 let clicked = false;
-                const end = Date.now() + 5000;
+                const end = Date.now() + 4000;
                 while (Date.now() < end && !clicked) {
                     const rows = await runQualityDom(tabId, 'clickLabel', { labels: names });
                     clicked = (rows || []).some(r => r?.value?.ok || r?.value === true);

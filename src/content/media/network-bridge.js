@@ -146,6 +146,107 @@
         });
     } catch (_) {}
 
+
+    // ---- Playback-API quality list (from Drive /playback responses) -----------------
+    // Same idea as the "menu + quality changer" prototype: parse mediaStreamingData
+    // so the extension knows available heights without opening Settings → Quality.
+    const LABEL_BY_ITAG = {
+        18: 360, 22: 720, 37: 1080, 59: 480,
+        133: 240, 134: 360, 135: 480, 136: 720, 137: 1080, 160: 144,
+        242: 240, 243: 360, 244: 480, 247: 720, 248: 1080, 278: 144,
+        264: 1440, 266: 2160, 271: 1440, 298: 720, 299: 1080, 313: 2160
+    };
+    const PLAYBACK_RE = /workspacevideo\S*\/media\/([\w-]+)\/playback/;
+    const FILE_ID_RE = /\/d\/([\w-]+)|[?&]id=([\w-]+)/;
+    const playbackById = Object.create(null);
+
+    function parseGoogleJson(text) {
+        try {
+            return JSON.parse(String(text || '').replace(/^\)\]\}'\n?/, ''));
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function heightsFromPlayback(json) {
+        const data = json?.mediaStreamingData?.formatStreamingData;
+        if (!data) return [];
+        const heights = new Set();
+        for (const list of [data.adaptiveTranscodes || [], data.progressiveTranscodes || []]) {
+            for (const t of list) {
+                const h = LABEL_BY_ITAG[t.itag] || t.transcodeMetadata?.height;
+                if (h) heights.add(Number(h));
+            }
+        }
+        return [...heights].filter(Boolean).sort((a, b) => b - a);
+    }
+
+    function postPlaybackQualities(id, json) {
+        if (!json?.mediaStreamingData) return;
+        playbackById[id] = json;
+        const heights = heightsFromPlayback(json);
+        if (!heights.length) return;
+        try {
+            window.top.postMessage({
+                type: 'PSD_GDRIVE_PLAYBACK_QUALITIES',
+                fileId: id,
+                heights,
+                labels: heights.map(h => `${h}p`),
+                bridgeId,
+                frameUrl: location.href,
+                capturedAt: Date.now()
+            }, TARGET);
+        } catch (_) {}
+    }
+
+    function storePlaybackFromResponse(url, textOrJson) {
+        const id = String(url || '').match(PLAYBACK_RE)?.[1];
+        if (!id) return;
+        const json = typeof textOrJson === 'string' ? parseGoogleJson(textOrJson) : textOrJson;
+        postPlaybackQualities(id, json);
+    }
+
+    // Wrap fetch again for body inspection (after the URL-only wrap above).
+    try {
+        const prevFetch = window.fetch;
+        window.fetch = async function (...args) {
+            const res = await prevFetch.apply(this, args);
+            try {
+                const url = res?.url || (typeof args[0] === 'string' ? args[0] : args[0]?.url);
+                if (url && PLAYBACK_RE.test(String(url))) {
+                    res.clone().text().then(text => storePlaybackFromResponse(url, text), () => {});
+                }
+            } catch (_) {}
+            return res;
+        };
+    } catch (_) {}
+
+    try {
+        const nativeOpen = XMLHttpRequest.prototype.open;
+        const nativeSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+            try { this.__psdPlaybackUrl = String(url || ''); } catch (_) {}
+            return nativeOpen.call(this, method, url, ...rest);
+        };
+        XMLHttpRequest.prototype.send = function (...args) {
+            try {
+                if (this.__psdPlaybackUrl && PLAYBACK_RE.test(this.__psdPlaybackUrl)) {
+                    this.addEventListener('load', () => {
+                        try {
+                            if (this.responseType === 'json' && this.response) {
+                                storePlaybackFromResponse(this.__psdPlaybackUrl, this.response);
+                            } else if (this.responseType === '' || this.responseType === 'text') {
+                                storePlaybackFromResponse(this.__psdPlaybackUrl, this.responseText);
+                            }
+                        } catch (_) {}
+                    });
+                }
+            } catch (_) {}
+            return nativeSend.apply(this, args);
+        };
+    } catch (_) {}
+
+
     // The isolated-world content script may be injected later (document_idle),
     // so advertise the bridge more than once during initial viewer startup.
     const advertise = () => {

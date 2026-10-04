@@ -23,7 +23,10 @@
         operation: 'idle',
         lastViewerState: false,
         lastFilenameSent: '',
-        bridgeReplayAt: {}
+        bridgeReplayAt: {},
+        playbackQualityHeights: [],
+        playbackQualityLabels: [],
+        playbackQualityFileId: ''
     };
 
     app.ids = {

@@ -126,23 +126,63 @@
         });
     }
 
+    // Own-text finder (same idea as the quality-changer prototype): more reliable
+    // than aria/tooltip matching when Drive rewrites menu structure.
+    function ownText(el) {
+        return [...(el?.childNodes || [])]
+            .filter(n => n.nodeType === 3)
+            .map(n => n.nodeValue)
+            .join('')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function findShareInMenu(menu) {
+        const byUi = app.ui.findShareRow(menu);
+        if (byUi) return byUi;
+        for (const item of menu.querySelectorAll('[role="menuitem"], li')) {
+            const label = item.querySelector('[jsname="K4r5Ff"]');
+            if (label && ownText(label) === 'Share') return item;
+            if (ownText(item) === 'Share') return item;
+        }
+        return app.ui.findMenuRow(menu, 'Share');
+    }
+
     function addProtectedVideoMenuItem(menu) {
         if (menu.querySelector(`#${VIDEO_MENU_ID}`)) return true;
 
+        // Only inject into protected (view-only) menus: has "Security limitations", no native Download/Print.
         const securityRow = app.ui.findMenuRow(menu, 'Security limitations');
-        if (!securityRow || app.ui.findMenuRow(menu, 'Print')) return false;
+        if (!securityRow) return false;
+        if (app.ui.findMenuRow(menu, 'Print') || app.ui.findMenuRow(menu, 'Download')) return false;
 
+        const shareRow = findShareInMenu(menu);
         const templateRow = app.ui.findMenuRow(menu, 'Details') ||
-            app.ui.findMenuRow(menu, 'Add to starred') || securityRow;
+            app.ui.findMenuRow(menu, 'Add to starred') ||
+            shareRow ||
+            securityRow;
         const item = app.ui.makeStandaloneMenuRow(templateRow, VIDEO_MENU_ID, 'Download');
         if (!item) return false;
 
+        // Strip more Drive action attrs so the row is fully inert (prototype style).
+        for (const el of [item, ...item.querySelectorAll('*')]) {
+            for (const { name } of [...el.attributes]) {
+                if (/^(jsaction|jscontroller|jsmodel|data-id|data-tooltip|data-tooltip-class)$/i.test(name)) {
+                    el.removeAttribute(name);
+                }
+            }
+        }
+        item.setAttribute('role', 'menuitem');
+        item.setAttribute('tabindex', '0');
+        item.setAttribute('data-psd-menu', 'download');
+
         configureVideoMenuItem(item);
-        app.ui.insertAfterReference(
-            securityRow.parentNode,
-            item,
-            app.ui.findShareRow(menu) || null
-        );
+
+        // Insert directly after Share when possible (prototype placement).
+        if (shareRow?.parentNode) {
+            shareRow.parentNode.insertBefore(item, shareRow.nextSibling);
+        } else {
+            app.ui.insertAfterReference(securityRow.parentNode, item, shareRow || null);
+        }
         return true;
     }
 
@@ -186,6 +226,43 @@
         return false;
     }
 
+    function optionsFromPlaybackApi() {
+        const heights = Array.isArray(video.playbackQualityHeights) ? video.playbackQualityHeights : [];
+        if (!heights.length) return [];
+        return heights.map(h => ({
+            height: Number(h) || 0,
+            label: `${Number(h)}p`,
+            selected: false,
+            source: 'playback-api'
+        })).filter(o => o.height);
+    }
+
+    function applyQualityOptions(options, note) {
+        const formats = {
+            video: options.map(o => ({
+                id: `label:${o.height}`,
+                height: Number(o.height) || 0,
+                qualityHeight: Number(o.height) || 0,
+                probeQuality: o.label || `${o.height}p`,
+                menuLabel: o.label || `${o.height}p`,
+                labelOnly: true,
+                url: ''
+            })),
+            audio: [],
+            progressive: []
+        };
+        video.qualityMenuOptions = options;
+        video.pickerFormats = formats;
+        video.scanCache = {
+            fileId: video.fileId,
+            at: Date.now(),
+            heightCount: options.length,
+            note: note || `Found ${options.length} quality option(s). Select one, then Download.`,
+            menuOptions: options.slice()
+        };
+        return formats;
+    }
+
     async function runQualityDetection() {
         if (video.operation === 'scanning') return;
 
@@ -196,7 +273,6 @@
 
         video.operation = 'scanning';
         updateVideoMenuState();
-        quality.showPageBlocker('Reading available qualities…');
 
         app.ui.closeDriveFileMenu();
         await quality.waitForDriveFileMenuClosed(1000);
@@ -205,8 +281,24 @@
             const context = await core.syncViewerContext(true);
             if (!context?.fileId) throw new Error('Could not identify the current Drive video.');
 
+            // 1) Prefer heights from the intercepted /playback API (prototype approach).
+            //    Available as soon as the video has played; no Settings→Quality DOM needed.
+            const fromApi = optionsFromPlaybackApi();
+            if (fromApi.length) {
+                const formats = applyQualityOptions(
+                    fromApi,
+                    `Found ${fromApi.length} quality option(s) from player. Select one, then Download.`
+                );
+                await quality.show(
+                    formats,
+                    `Found ${fromApi.length} quality option(s). Select one, then Download.`,
+                    fromApi
+                );
+                return;
+            }
+
+            // 2) Fallback: open Settings → Quality and scan ARIA labels (existing flow).
             let response = null;
-            // Two attempts — Settings/Quality menu is flaky right after closing File menu.
             for (let attempt = 0; attempt < 2; attempt++) {
                 response = await core.sendRuntime({
                     action: 'listPlayerQualityLabels',
@@ -218,28 +310,10 @@
 
             const options = Array.isArray(response?.options) ? response.options : [];
             if (response?.success && options.length) {
-                const formats = {
-                    video: options.map(o => ({
-                        id: `label:${o.height}`,
-                        height: Number(o.height) || 0,
-                        qualityHeight: Number(o.height) || 0,
-                        probeQuality: o.label || `${o.height}p`,
-                        menuLabel: o.label || `${o.height}p`,
-                        labelOnly: true,
-                        url: ''
-                    })),
-                    audio: [],
-                    progressive: []
-                };
-                video.qualityMenuOptions = options;
-                video.pickerFormats = formats;
-                video.scanCache = {
-                    fileId: video.fileId,
-                    at: Date.now(),
-                    heightCount: options.length,
-                    note: `Found ${options.length} quality option(s). Select one, then Download.`,
-                    menuOptions: options.slice()
-                };
+                const formats = applyQualityOptions(
+                    options,
+                    `Found ${options.length} quality option(s). Select one, then Download.`
+                );
                 await quality.show(
                     formats,
                     `Found ${options.length} quality option(s). Select one, then Download.`,
@@ -248,8 +322,6 @@
                 return;
             }
 
-            // Label scan failed — do NOT pretend current stream is a full quality list.
-            // Show a clear error so the user retries while the player is open.
             video.operation = 'picker';
             updateVideoMenuState();
             await quality.show(
@@ -423,6 +495,9 @@
             video.scanCache = null;
             video.restorePickerOnFileMenuOpen = false;
             video.qualityMenuOptions = [];
+            video.playbackQualityHeights = [];
+            video.playbackQualityLabels = [];
+            video.playbackQualityFileId = '';
             video.playbackStarted = false;
         } catch (_) {}
         try {

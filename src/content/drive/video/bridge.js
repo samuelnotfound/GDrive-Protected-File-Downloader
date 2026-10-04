@@ -44,6 +44,19 @@
         } catch (_) {}
     }
 
+    function handlePlaybackQualities(data) {
+        const heights = Array.isArray(data.heights) ? data.heights.map(Number).filter(Boolean) : [];
+        if (!heights.length) return;
+        // Prefer the highest set we have seen for this page/session.
+        const prev = Array.isArray(video.playbackQualityHeights) ? video.playbackQualityHeights : [];
+        const merged = [...new Set([...prev, ...heights])].sort((a, b) => b - a);
+        video.playbackQualityHeights = merged;
+        video.playbackQualityLabels = merged.map(h => `${h}p`);
+        video.playbackQualityFileId = String(data.fileId || video.playbackQualityFileId || '');
+        video.playbackStarted = true;
+        try { app.video?.updateMenuState?.(); } catch (_) {}
+    }
+
     async function handlePageBridgeMessage(event) {
         const data = event?.data;
         if (!data || typeof data !== 'object' || window.top !== window) return;
@@ -53,6 +66,7 @@
             return;
         }
         if (data.type === 'PSD_GDRIVE_STREAM_DETECTED') await handleDetectedStream(data);
+        if (data.type === 'PSD_GDRIVE_PLAYBACK_QUALITIES') handlePlaybackQualities(data);
     }
 
     function installPageNetworkRelay() {

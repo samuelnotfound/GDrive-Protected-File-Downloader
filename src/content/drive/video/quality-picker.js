@@ -88,7 +88,7 @@
         root = document.createElement('div');
         root.id = 'psd-video-scan-blocker';
         root.setAttribute('role', 'presentation');
-        // Dim matches PDF scroll dim; card matches other overlays (bottom-right 360px).
+        // Dim and card match other overlays (bottom-right 360px).
         root.innerHTML = `
             <style>
                 #psd-video-scan-blocker{
@@ -140,13 +140,10 @@
         return !!scanCancelled;
     }
 
-    function showPageBlocker(message = SCAN_VEIL_TEXT) {
-        if (window.top !== window.self) return;
+    function showPageBlocker(_message = SCAN_VEIL_TEXT) {
+        // Page dim/overlay disabled — quality scan & click run without blocking the page.
+        hidePageBlocker();
         scanCancelled = false;
-        const blocker = ensureScanPageBlocker();
-        const textEl = blocker.querySelector('.psd-scan-text');
-        if (textEl) textEl.textContent = message || SCAN_VEIL_TEXT;
-        blocker.dataset.open = 'true';
     }
 
     function hidePageBlocker() {
@@ -1008,7 +1005,6 @@
         if (video._downloadGuard) return;
         video._downloadGuard = true;
 
-        let captureBlockerShown = false;
         try {
         core.muteMediaImmediately();
 
@@ -1034,10 +1030,8 @@
             || (height ? `${height}p` : '')
         ).trim();
 
-        // Dim the page (same veil as quality probe) while we switch quality and capture.
         const veilMsg = `Preparing ${label || (height ? height + 'p' : 'download')}…`;
         status.textContent = veilMsg;
-        try { showPageBlocker(veilMsg); captureBlockerShown = true; } catch (_) {}
         app.ui.closeDriveFileMenu();
 
         let capture = null;
@@ -1082,7 +1076,6 @@
         }
 
         status.textContent = 'Starting download…';
-        try { showPageBlocker('Starting download…'); } catch (_) {}
         const response = await core.sendDownload({
             ...request,
             qualityHeight: pickHeight,
@@ -1102,14 +1095,10 @@
             return;
         }
 
-        // beginVideoDownload hides the veil and shows the progress overlay.
         beginVideoDownload(root, response);
-        captureBlockerShown = false;
         } finally {
             video._downloadGuard = false;
-            if (captureBlockerShown) {
-                try { hidePageBlocker(); } catch (_) {}
-            }
+            try { hidePageBlocker(); } catch (_) {}
         }
     }
 
