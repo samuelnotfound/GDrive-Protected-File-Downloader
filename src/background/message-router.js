@@ -1,37 +1,99 @@
+// ============================================================================
+// FILE: src/background/message-router.js
+// PURPOSE: Central IPC (Inter-Process Communication) message router and action
+//          dispatch table. Receives messages from content scripts, popup/overlays,
+//          and the offscreen remuxer document; coordinates quality probing,
+//          format harvesting, UI snapshots, and video download stages.
+// ============================================================================
+
+/** Storage key under chrome.storage for caching quality picker UI snapshots */
 const PICKER_SNAPSHOT_KEY = 'psdQualityPickerSnapshots';
 
+/** Standardized response factory for unauthorized or missing tab contexts */
 const invalidTabResponse = () => ({ success: false, error: 'Invalid Drive tab.' });
+
+/** Standardized response factory when a Drive file changes mid-operation */
 const sessionChangedResponse = () => ({ success: false, error: 'The current Drive video session changed.' });
 
+/**
+ * Higher-order middleware function ensuring a valid integer `tabId` exists in context.
+ *
+ * HOW IT WORKS:
+ * Wraps an action handler with a check: `Number.isInteger(ctx.tabId)`.
+ * If valid, delegates to `handler(ctx)`. Otherwise, returns `unauthorizedResponse()`.
+ *
+ * @param {Function} handler - Inner handler function
+ * @param {Function} [unauthorizedResponse=invalidTabResponse] - Fallback response generator
+ * @returns {Function}
+ */
 const requireDriveTab = (handler, unauthorizedResponse = invalidTabResponse) =>
     ctx => (Number.isInteger(ctx.tabId) ? handler(ctx) : unauthorizedResponse());
 
+/**
+ * Helper to fetch and validate the tab session for a specific Drive file ID.
+ *
+ * @param {number} tabId - Browser tab ID
+ * @param {string} requestedFileId - Target Google Drive file ID
+ * @returns {Promise<{session: Object, fileId: string}|null>} Session and resolved fileId or null
+ */
 async function getSessionForFile(tabId, requestedFileId) {
     const session = await getStoredSession(tabId);
     const fileId = String(requestedFileId || session?.fileId || '').trim();
+    // Valid if session exists, fileId is non-empty, and matches session fileId
     const isCurrent = session && fileId && (!session.fileId || session.fileId === fileId);
     return isCurrent ? { session, fileId } : null;
 }
 
+// ============================================================================
+// QUALITY PICKER UI SNAPSHOT STORAGE
+// ============================================================================
+// PURPOSE:
+// Once the extension scans available qualities (e.g. 1080p, 720p, 360p) for a video,
+// it saves a snapshot in storage. When the user re-opens the download modal,
+// the options are displayed instantly from cache without re-opening Settings menu!
+// ============================================================================
 
+/**
+ * Reads quality picker snapshots dictionary from a specified storage area.
+ *
+ * @param {chrome.storage.StorageArea} storageArea - session or local storage
+ * @returns {Promise<Object>} Map of snapshots keyed by fileId
+ */
 async function readPickerSnapshots(storageArea) {
     const data = await storageArea.get(PICKER_SNAPSHOT_KEY);
     const snapshots = data?.[PICKER_SNAPSHOT_KEY];
     return snapshots && typeof snapshots === 'object' ? snapshots : {};
 }
 
+/**
+ * Writes or updates a snapshot for a specific fileId.
+ *
+ * @param {chrome.storage.StorageArea} storageArea
+ * @param {string} fileId
+ * @param {Object} snapshot
+ */
 async function writePickerSnapshot(storageArea, fileId, snapshot) {
     const snapshots = await readPickerSnapshots(storageArea);
     snapshots[fileId] = snapshot;
     await storageArea.set({ [PICKER_SNAPSHOT_KEY]: snapshots });
 }
 
+/**
+ * Deletes snapshot for a specific fileId.
+ *
+ * @param {chrome.storage.StorageArea} storageArea
+ * @param {string} fileId
+ */
 async function deletePickerSnapshot(storageArea, fileId) {
     const snapshots = { ...await readPickerSnapshots(storageArea) };
     delete snapshots[fileId];
     await storageArea.set({ [PICKER_SNAPSHOT_KEY]: snapshots });
 }
 
+/**
+ * Action: saveQualityPickerSnapshot
+ * Persists quality options snapshot into session storage (falling back to local storage).
+ */
 async function handleSaveQualityPickerSnapshot({ request }) {
     const fileId = String(request.fileId || '').trim();
     if (!fileId || !request.snapshot?.formats) return { success: false, error: 'No quality snapshot.' };
@@ -45,6 +107,10 @@ async function handleSaveQualityPickerSnapshot({ request }) {
     }
 }
 
+/**
+ * Action: loadQualityPickerSnapshot
+ * Reads cached quality options snapshot for a fileId.
+ */
 async function handleLoadQualityPickerSnapshot({ request }) {
     const fileId = String(request.fileId || '').trim();
     if (!fileId) return { success: false, error: 'Missing file id.' };
@@ -59,6 +125,10 @@ async function handleLoadQualityPickerSnapshot({ request }) {
     }
 }
 
+/**
+ * Action: clearQualityPickerSnapshot
+ * Removes cached snapshot for a fileId from both storage areas.
+ */
 async function handleClearQualityPickerSnapshot({ request }) {
     const fileId = String(request.fileId || '').trim();
     if (!fileId) return { success: true };
@@ -68,7 +138,16 @@ async function handleClearQualityPickerSnapshot({ request }) {
     return { success: true };
 }
 
-
+/**
+ * Action: setVideoContext
+ * Initializes or updates the active video session when content script binds to a Drive page.
+ *
+ * HOW IT WORKS:
+ * 1. Checks if current tab session exists and whether fileId/viewerSessionId changed.
+ * 2. If changed, resets to a fresh `emptySession()`.
+ * 3. Immediately enables `streamCaptureEnabled = true` so pre-download playback captures formats.
+ * 4. Clears toolbar action badge if context changed.
+ */
 async function handleSetVideoContext({ request, tabId }) {
     const fileId = String(request.fileId || '').trim();
     const viewerSessionId = String(request.viewerSessionId || '').trim();
@@ -91,8 +170,7 @@ async function handleSetVideoContext({ request, tabId }) {
             pageBridgeId: pageBridgeId || current.pageBridgeId || ''
         };
 
-    // Capture is on for the active viewer session immediately, so several quality URLs the user has
-    // already generated before pressing Download are retained.
+    // Enable stream capture immediately for active viewer session
     next.streamCaptureEnabled = true;
     if (!changed && pageBridgeId) next.pageBridgeId = pageBridgeId;
 
@@ -101,6 +179,10 @@ async function handleSetVideoContext({ request, tabId }) {
     return { success: true, changed, session: next };
 }
 
+/**
+ * Action: updateFilename
+ * Renames the file in the tab's active session.
+ */
 async function handleUpdateFilename({ request, tabId }) {
     const filename = String(request.filename || '').trim();
     await queueSessionMutation(tabId, session => {
@@ -111,6 +193,10 @@ async function handleUpdateFilename({ request, tabId }) {
     return { success: true };
 }
 
+/**
+ * Action: videoPlaybackIntent
+ * Marks streamCaptureEnabled = true when user hovers or clicks play.
+ */
 async function handleVideoPlaybackIntent({ request, tabId }) {
     await queueSessionMutation(tabId, session => {
         if (request.fileId && session.fileId && request.fileId !== session.fileId) return false;
@@ -120,6 +206,10 @@ async function handleVideoPlaybackIntent({ request, tabId }) {
     return { success: true };
 }
 
+/**
+ * Action: videoPlaybackStarted
+ * Sets playbackStarted = true and streamCaptureEnabled = true.
+ */
 async function handleVideoPlaybackStarted({ tabId }) {
     await queueSessionMutation(tabId, session => {
         if (session.playbackStarted) return false;
@@ -130,7 +220,9 @@ async function handleVideoPlaybackStarted({ tabId }) {
     return { success: true };
 }
 
-
+/**
+ * Validates that an incoming page-bridge stream belongs to the active viewer session.
+ */
 function validatePageStream({ session, fileId, viewerSessionId, pageBridgeId, candidate }) {
     if (!session || !fileId || !viewerSessionId) return { success: false, error: 'No active Drive viewer session.' };
     if (session.fileId && fileId !== session.fileId) return { success: false, error: 'Drive file/session mismatch.' };
@@ -143,6 +235,9 @@ function validatePageStream({ session, fileId, viewerSessionId, pageBridgeId, ca
     return null;
 }
 
+/**
+ * Helper to update format lists and current pointers when a stream is captured.
+ */
 function addCapturedStreamToSession(session, candidate, isAudio) {
     const kind = isAudio ? 'audio' : 'video';
     session[kind] = candidate.url;
@@ -166,6 +261,17 @@ function addCapturedStreamToSession(session, candidate, isAudio) {
     };
 }
 
+/**
+ * Action: pageStreamDetected
+ * Receives stream detection messages from content script fetch/XHR hooks (network-bridge.js).
+ *
+ * HOW IT WORKS:
+ * 1. Parses stream URL into structured candidate.
+ * 2. Tags candidate into in-memory probe buffer immediately (ensures zero-latency matching).
+ * 3. Validates against active session.
+ * 4. Persists format into storage session.
+ * 5. Updates badge to "ON" and broadcasts `videoStreamDetected` to tab UI.
+ */
 async function handlePageStreamDetected({ request, tabId }) {
     const url = String(request.url || '').trim();
     if (!url || !url.includes('/videoplayback')) return { success: false, error: 'Not a Drive playback URL.' };
@@ -173,9 +279,7 @@ async function handlePageStreamDetected({ request, tabId }) {
     const parsed = parseStreamCandidate(url, url);
     if (!parsed) return { success: false, error: 'Could not parse Drive playback URL.' };
 
-    // Tag into the in-memory probe buffer FIRST (same as webRequest path).
-    // waitForQualityStream polls memory; waiting on the storage queue was the
-    // main reason quality-click streams were missed during automated scans.
+    // Tag into the in-memory probe buffer FIRST (same as webRequest path)
     const state = streamCaptureState(tabId);
     const activeProbe = state.activeProbe;
     const candidate = {
@@ -209,8 +313,6 @@ async function handlePageStreamDetected({ request, tabId }) {
 
         const probe = current.activeQualityProbe;
         if (probe) {
-            // Use the shared probe stamp helper so page-bridge and webRequest
-            // paths never diverge on height / token handling.
             tagCandidateWithProbe(candidate, probe);
             const limit = (typeof PROBE_BUFFER_LIMIT === 'number') ? PROBE_BUFFER_LIMIT : 48;
             current.probeCandidates = addUniqueCandidate(
@@ -220,7 +322,6 @@ async function handlePageStreamDetected({ request, tabId }) {
             );
         }
 
-        // Simple-plugin classification: mime=audio in URL, else itag/isAudioStream.
         const rawUrl = String(candidate.originalUrl || candidate.url || '');
         const isAudio = rawUrl.includes('mime=audio') || isAudioStream(candidate);
         if (isAudio && typeof saveGlobalStream === 'function') {
@@ -247,124 +348,132 @@ async function handlePageStreamDetected({ request, tabId }) {
     return { success: true, session: latest, stream: candidate };
 }
 
-
-
+/**
+ * Action: listPlayerQualityLabels
+ * Opens the Drive video player's Settings -> Quality menu and reads all available resolution options.
+ *
+ * HOW IT WORKS:
+ * 1. Checks `QUALITY_SCAN_TAB_LOCK` to ensure no other scan is executing concurrently.
+ * 2. Reveals player controls, clicks "Settings", then clicks "Quality".
+ * 3. Dispatches `scanQualities` DOM action into all frames to inspect popup list items.
+ * 4. Extracts heights (e.g. 1080, 720, 480, 360) and labels.
+ * 5. Closes the player menu so UI returns to normal.
+ * 6. Returns list of available resolutions sorted highest first.
+ */
 async function handleListPlayerQualityLabels({ request, tabId }) {
-    // Labels do not require a fully seeded session — only a Drive tab.
-    // Share the quality-scan lock with capture so Settings→Quality DOM work never races.
     const existing = QUALITY_SCAN_TAB_LOCK.get(tabId);
     if (existing?.promise) {
         return { success: false, error: 'Another quality operation is already running on this tab.', options: [] };
     }
 
     const work = (async () => {
-    const found = await getSessionForFile(tabId, request.fileId);
-    const fileId = String(found?.fileId || request.fileId || '').trim();
+        const found = await getSessionForFile(tabId, request.fileId);
+        const fileId = String(found?.fileId || request.fileId || '').trim();
 
-    const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
-    const QUALITY = ['quality', 'video quality', 'quality settings'];
+        // Localized string variants for Settings and Quality buttons
+        const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
+        const QUALITY = ['quality', 'video quality', 'quality settings'];
 
-    try {
-        // Playback is the user's job — no autoplay. Open Settings → Quality and
-        // read every quality row at once (same as Drive Quality Trigger).
+        try {
+            let options = [];
+            let lastError = '';
 
-        let options = [];
-        let lastError = '';
+            for (let attempt = 0; attempt < 2 && !options.length; attempt++) {
+                await closePlayerMenu(tabId);
+                await sleep(150 + attempt * 100);
+                try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
 
-        for (let attempt = 0; attempt < 2 && !options.length; attempt++) {
-            await closePlayerMenu(tabId);
-            await sleep(150 + attempt * 100);
-            try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
-
-            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 5000, true);
-            if (!settings?.ok) {
-                lastError = settings?.reason || 'Could not open Settings.';
-                continue;
-            }
-            await sleep(300);
-
-            const quality = await clickMenuLikeMini(
-                tabId, QUALITY, 'Quality', 5000, false,
-                Number.isInteger(settings.frameId) ? settings.frameId : null
-            );
-            if (!quality?.ok) {
-                lastError = quality?.reason || 'Could not open Quality menu.';
-                continue;
-            }
-            await sleep(300);
-
-            // Scan quality labels while the submenu is open.
-            const deadline = Date.now() + 4000;
-            while (Date.now() < deadline) {
-                const rows = await runQualityDom(tabId, 'scanQualities');
-                const byHeight = new Map();
-                for (const row of rows || []) {
-                    const value = row?.value;
-                    const list = Array.isArray(value?.options) ? value.options
-                        : Array.isArray(value) ? value
-                        : [];
-                    for (const opt of list) {
-                        if (typeof opt === 'string') {
-                            const h = Number(String(opt).match(/(\d{3,4})p/i)?.[1] || 0);
-                            if (h) byHeight.set(h, { height: h, label: String(opt).trim(), selected: false });
-                            continue;
-                        }
-                        const h = Number(opt?.height || 0);
-                        if (!h) continue;
-                        const lab = String(opt.text || opt.label || `${h}p`).trim();
-                        const prev = byHeight.get(h);
-                        if (!prev || opt.selected) byHeight.set(h, { height: h, label: lab, selected: !!opt.selected });
-                    }
-                    for (const lab of (value?.labels || [])) {
-                        const h = Number(String(lab).match(/(\d{3,4})p/i)?.[1] || 0);
-                        if (h && !byHeight.has(h)) {
-                            byHeight.set(h, { height: h, label: String(lab).trim(), selected: false });
-                        }
-                    }
+                // Open Settings menu
+                const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 5000, true);
+                if (!settings?.ok) {
+                    lastError = settings?.reason || 'Could not open Settings.';
+                    continue;
                 }
-                options = [...byHeight.values()].sort((a, b) => b.height - a.height);
+                await sleep(300);
+
+                // Open Quality submenu
+                const quality = await clickMenuLikeMini(
+                    tabId, QUALITY, 'Quality', 5000, false,
+                    Number.isInteger(settings.frameId) ? settings.frameId : null
+                );
+                if (!quality?.ok) {
+                    lastError = quality?.reason || 'Could not open Quality menu.';
+                    continue;
+                }
+                await sleep(300);
+
+                // Scan quality options while submenu is visible
+                const deadline = Date.now() + 4000;
+                while (Date.now() < deadline) {
+                    const rows = await runQualityDom(tabId, 'scanQualities');
+                    const byHeight = new Map();
+                    for (const row of rows || []) {
+                        const value = row?.value;
+                        const list = Array.isArray(value?.options) ? value.options
+                            : Array.isArray(value) ? value
+                            : [];
+                        for (const opt of list) {
+                            if (typeof opt === 'string') {
+                                const h = Number(String(opt).match(/(\d{3,4})p/i)?.[1] || 0);
+                                if (h) byHeight.set(h, { height: h, label: String(opt).trim(), selected: false });
+                                continue;
+                            }
+                            const h = Number(opt?.height || 0);
+                            if (!h) continue;
+                            const lab = String(opt.text || opt.label || `${h}p`).trim();
+                            const prev = byHeight.get(h);
+                            if (!prev || opt.selected) byHeight.set(h, { height: h, label: lab, selected: !!opt.selected });
+                        }
+                        for (const lab of (value?.labels || [])) {
+                            const h = Number(String(lab).match(/(\d{3,4})p/i)?.[1] || 0);
+                            if (h && !byHeight.has(h)) {
+                                byHeight.set(h, { height: h, label: String(lab).trim(), selected: false });
+                            }
+                        }
+                    }
+                    options = [...byHeight.values()].sort((a, b) => b.height - a.height);
+                    if (options.length) break;
+                    await sleep(120);
+                }
+
+                await closePlayerMenu(tabId);
                 if (options.length) break;
-                await sleep(120);
+                lastError = lastError || 'No quality options were found in the menu.';
             }
 
-            await closePlayerMenu(tabId);
-            if (options.length) break;
-            lastError = lastError || 'No quality options were found in the menu.';
-        }
+            if (!options.length) {
+                try { await closePlayerMenu(tabId); } catch (_) {}
+                return {
+                    success: false,
+                    error: lastError || 'No quality options were found in the menu.',
+                    options: []
+                };
+            }
 
-        if (!options.length) {
-            try { await closePlayerMenu(tabId); } catch (_) {}
             return {
-                success: false,
-                error: lastError || 'No quality options were found in the menu.',
-                options: []
+                success: true,
+                fileId,
+                options,
+                formats: {
+                    video: options.map(o => ({
+                        id: `label:${o.height}`,
+                        height: o.height,
+                        qualityHeight: o.height,
+                        probeQuality: o.label,
+                        menuLabel: o.label,
+                        labelOnly: true,
+                        url: ''
+                    })),
+                    audio: [],
+                    progressive: []
+                }
             };
+        } catch (error) {
+            return { success: false, error: error?.message || 'Failed to list quality labels.', options: [] };
         }
-
-        return {
-            success: true,
-            fileId,
-            options,
-            formats: {
-                video: options.map(o => ({
-                    id: `label:${o.height}`,
-                    height: o.height,
-                    qualityHeight: o.height,
-                    probeQuality: o.label,
-                    menuLabel: o.label,
-                    labelOnly: true,
-                    url: ''
-                })),
-                audio: [],
-                progressive: []
-            }
-        };
-    } catch (error) {
-        return { success: false, error: error?.message || 'Failed to list quality labels.', options: [] };
-    } finally {
-    }
     })();
 
+    // Store in lock Map
     QUALITY_SCAN_TAB_LOCK.set(tabId, { promise: work, finishedAt: 0 });
     try {
         return await work;
@@ -374,8 +483,13 @@ async function handleListPlayerQualityLabels({ request, tabId }) {
 }
 
 /**
- * Phase 2 — user picked a label. Click that quality on the player, wait for ONE
- * unique stream URL, pair with shared audio, return both for download.
+ * Action: captureQualityForDownload
+ * When user selects a quality in the UI:
+ * 1. Simulates click on that quality in the player.
+ * 2. Nudges playback to force segment requests.
+ * 3. Waits for the video stream URL for that quality.
+ * 4. Resolves shared audio track.
+ * 5. Returns both streams ready for download.
  */
 async function handleCaptureQualityForDownload({ request, tabId }) {
     const height = Number(request.qualityHeight || request.height || 0);
@@ -388,7 +502,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
     if (!found) return sessionChangedResponse();
     const { fileId } = found;
 
-    // Tab lock so we never stack two clicks.
+    // Concurrency lock
     const existing = QUALITY_SCAN_TAB_LOCK.get(tabId);
     if (existing?.promise) {
         return { success: false, error: 'Another quality capture is already running.' };
@@ -396,7 +510,6 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
 
     const work = (async () => {
         try {
-                // clickQuality presses Settings → Quality → resolution (with its own fallbacks).
             const clickAt = Date.now();
 
             await closePlayerMenu(tabId);
@@ -404,8 +517,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
             await sleep(100);
 
-            // clickQuality (content) already does Settings → Quality → option
-            // plus a direct-option fallback. One verified pass is enough.
+            // Select quality verified in player menu
             const selected = await selectQualityVerified(
                 tabId, label || `${height}p`, height, 8000, null
             );
@@ -413,8 +525,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 return { success: false, error: `Could not find ${label || height + 'p'} in the quality menu.` };
             }
 
-            // Harvest whatever is ALREADY playing (same quality → Drive may not
-            // fire a new request when we re-select the active row).
+            // Snapshot stream currently playing (in case user re-selected current quality)
             const harvestCurrentVideo = () => {
                 const recent = (streamCaptureState(tabId)?.recentStreams || [])
                     .filter(s => s?.url && !isAudioStream(s))
@@ -424,16 +535,18 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             };
             const alreadyPlaying = harvestCurrentVideo();
 
-            // Nudge/seek so Drive often re-requests a segment even for the same itag.
+            // Nudge playback to trigger HTTP segment request
             try { await nudgePlaybackAfterQualitySwitch(tabId); } catch (_) {}
 
+            // Start quality probe transaction
             const probe = await beginQualityProbe(tabId, fileId, label || `${height}p`);
             if (probe && probe.accepted === false) {
                 return { success: false, error: 'Session changed during quality capture. Open the video again and retry.' };
             }
+
             let video = null;
             try {
-                // Short wait for a fresh post-click URL (quality change case).
+                // Wait for network capture matching probe
                 video = await waitForQualityStream(tabId, probe.token, height, (typeof FAST_SCAN !== "undefined" ? FAST_SCAN.streamWaitMs : 1500), new Set(), clickAt);
                 if (!video?.url) {
                     const recentAfter = (streamCaptureState(tabId)?.recentStreams || [])
@@ -441,11 +554,11 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                         .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
                     video = recentAfter[0] || null;
                 }
-                // Same quality already playing: no new network request — reuse current stream.
+                // Fallback to already playing stream if Drive didn't fire a new request
                 if (!video?.url && alreadyPlaying?.url) {
                     video = alreadyPlaying;
                 }
-                // Session last video as last resort (per-tab only). Avoid global cross-tab leak.
+                // Final fallback to session video
                 if (!video?.url) {
                     const session = await getStoredSession(tabId);
                     if (session?.video) {
@@ -476,8 +589,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 };
             }
 
-            // Only apply the requested height when the stream was probe-tagged for
-            // this capture or already reports that height. Never relabel a leftover.
+            // Stamp verified height
             const actualH = Number(video.height || video.qualityHeight || 0);
             const probeMatched = (
                 video.probeToken
@@ -488,6 +600,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             const stampedHeight = probeMatched
                 ? (actualH || height)
                 : (actualH || 0);
+
             video = {
                 ...video,
                 height: stampedHeight,
@@ -497,12 +610,11 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 originalUrl: video.originalUrl || video.url
             };
             if (!stampedHeight && height) {
-                // Still record the requested label for UI, but do not claim the URL is that tier.
                 video.requestedHeight = height;
                 video.requestedLabel = label;
             }
 
-            // Shared audio — session / recent / global.
+            // Resolve shared audio track
             let audio = await getCurrentSessionAudioCandidate(tabId);
             if (!audio?.url) {
                 audio = (streamCaptureState(tabId)?.recentStreams || []).find(isAudioStream)
@@ -517,8 +629,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 try { await lockSharedAudioOnSession(tabId, audio); } catch (_) {}
             }
 
-            // Persist this video onto the session so startVideoDownload can find it.
-            // Reject if the tab navigated to a different Drive file mid-capture.
+            // Persist video and audio formats into stored session
             await queueSessionMutation(tabId, current => {
                 if (!current) return false;
                 if (fileId && current.fileId && current.fileId !== fileId) return false;
@@ -549,7 +660,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 label
             };
         } finally {
-                try { await closePlayerMenu(tabId); } catch (_) {}
+            try { await closePlayerMenu(tabId); } catch (_) {}
         }
     })();
 
@@ -561,6 +672,10 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
     }
 }
 
+/**
+ * Action: clearTabCaptureState
+ * Wipes capture state for a tab upon request.
+ */
 async function handleClearTabCaptureState({ tabId }) {
     if (!Number.isInteger(tabId) || tabId < 0) return { success: false };
     try {
@@ -579,6 +694,10 @@ async function handleClearTabCaptureState({ tabId }) {
     return { success: true };
 }
 
+/**
+ * Action: getStreams
+ * Aggregates all discovered streams and formats for the tab, merging recent captures.
+ */
 const handleGetStreams = async ({ tabId }) => {
     if (typeof loadGlobalStreamsFromStorage === 'function') {
         await loadGlobalStreamsFromStorage();
@@ -591,11 +710,9 @@ const handleGetStreams = async ({ tabId }) => {
         ? (streamCaptureState(tabId)?.recentStreams || [])
         : [];
 
-    // Harvest anything already playing: recent ring + globals, even with no formal session.
     const recentVideo = recent.filter(s => s?.url && !isAudioStream(s));
     const recentAudio = recent.filter(s => s?.url && isAudioStream(s));
 
-    // Ensure a minimal session object so the current Drive tab always has state to read from.
     if (!session) {
         session = {
             fileId: '',
@@ -610,7 +727,7 @@ const handleGetStreams = async ({ tabId }) => {
     session.videoCandidates = Array.isArray(session.videoCandidates) ? session.videoCandidates : [];
     session.audioCandidates = Array.isArray(session.audioCandidates) ? session.audioCandidates : [];
 
-    // Merge recent video into candidates + formats (current playing quality).
+    // Merge recent video captures
     for (const stream of recentVideo) {
         session.videoCandidates = addUniqueCandidate(session.videoCandidates, stream, 24);
         if (isMuxedStream(stream)) {
@@ -633,7 +750,8 @@ const handleGetStreams = async ({ tabId }) => {
             session.videoOriginal = stream.originalUrl || stream.url;
         }
     }
-    // Global last video if still empty.
+
+    // Merge global fallback video
     if (globalVideo?.url && !(session.formats.video || []).length && !(session.formats.progressive || []).length) {
         session.videoCandidates = addUniqueCandidate(session.videoCandidates, globalVideo, 24);
         session.formats.video = mergeFormatLists(session.formats.video || [], [globalVideo], byHeightWidthThenSize, 48);
@@ -641,7 +759,7 @@ const handleGetStreams = async ({ tabId }) => {
         session.videoOriginal = globalVideo.originalUrl || globalVideo.url;
     }
 
-    // Audio: recent → global → session
+    // Merge recent audio captures
     for (const stream of recentAudio) {
         session.audioCandidates = addUniqueCandidate(session.audioCandidates, stream, 8);
         if (!session.audio) {
@@ -668,7 +786,7 @@ const handleGetStreams = async ({ tabId }) => {
         }];
     }
 
-    // Persist merge when we have a real tab session key.
+    // Persist merged state into storage
     if (Number.isInteger(tabId) && tabId >= 0 && (session.fileId || session.video || session.audio)) {
         try {
             const existing = await getStoredSession(tabId);
@@ -709,16 +827,32 @@ const handleGetStreams = async ({ tabId }) => {
     };
 };
 
-
+/**
+ * Action: downloadVideo
+ * Initiates the video download process.
+ */
 const handleDownloadVideo = ({ request, tabId }) => startVideoDownload(tabId, request || {});
 
+/**
+ * Type: getVideoStageJob
+ * Retrieves staging job metadata requested by offscreen downloader.
+ */
 async function handleGetVideoStageJob({ request }) {
     const job = (await getStoredJobs())[request.jobId];
     return job ? { success: true, job } : { success: false, error: 'Staging job not found.' };
 }
 
+/** Set of terminal stage job event types */
 const FINISHED_STAGE_TYPES = new Set(['videoStageFinished', 'videoStageError', 'videoStageCancelled']);
 
+/**
+ * Cancels an active video download staging job.
+ *
+ * @param {string} jobId - Job ID
+ * @param {Object} job - Stored job object
+ * @param {Object} [options]
+ * @param {boolean} [options.silent=false] - If true, do not send cancellation event to tab
+ */
 async function cancelVideoStage(jobId, job, options = {}) {
     stopStreamWarmups(jobId);
     clearDownloadMonitor(jobId);
@@ -727,21 +861,28 @@ async function cancelVideoStage(jobId, job, options = {}) {
         await sendTab(job.sourceTabId, { type: 'videoStageCancelled', jobId });
     }
     await removeVideoStageJob(jobId);
+    // Schedule check to close offscreen document
     setTimeout(closeVideoOffscreen, 100);
     return { success: true };
 }
 
+/**
+ * Relays progress and lifecycle messages from offscreen chunk downloader to tab UI.
+ */
 async function handleVideoStageMessage({ request }) {
     const job = (await getStoredJobs())[request.jobId];
     const isCancel = request.type === 'videoStageCancel';
 
+    // Record progress bytes for CDN slow-start monitor
     if (request.type === 'videoStageProgress' && request.jobId) {
         noteDownloadProgress(request.jobId, request.label, request.received);
     }
 
+    // Forward progress/status message to originating tab UI
     if (job?.sourceTabId != null && !isCancel) await sendTab(job.sourceTabId, { type: request.type, ...request });
     if (isCancel) return cancelVideoStage(request.jobId, job);
 
+    // If job finished, errored, or cancelled, clean up resources
     if (FINISHED_STAGE_TYPES.has(request.type)) {
         stopStreamWarmups(request.jobId);
         clearDownloadMonitor(request.jobId);
@@ -755,7 +896,9 @@ async function handleVideoStageMessage({ request }) {
     return { success: true };
 }
 
-
+/**
+ * Map of actions keyed by `request.action`.
+ */
 const ACTION_HANDLERS = Object.freeze({
     saveQualityPickerSnapshot: requireDriveTab(handleSaveQualityPickerSnapshot),
     loadQualityPickerSnapshot: requireDriveTab(handleLoadQualityPickerSnapshot),
@@ -772,28 +915,51 @@ const ACTION_HANDLERS = Object.freeze({
     downloadVideo: handleDownloadVideo
 });
 
+/**
+ * Map of handlers keyed by `request.type`.
+ */
 const TYPE_HANDLERS = Object.freeze({
     getVideoStageJob: handleGetVideoStageJob
 });
 
+/**
+ * Central runtime message dispatcher.
+ * Resolves target tabId from request or sender and routes to matching handler.
+ *
+ * @param {Object} request - Incoming JSON payload
+ * @param {Object} sender - Sender metadata from Chrome
+ * @returns {Promise<*>}
+ */
 async function handleRuntimeMessage(request = {}, sender = {}) {
     const tabId = Number.isInteger(request.tabId) ? request.tabId : sender?.tab?.id;
     const ctx = { request, sender, tabId };
 
+    // 1. Check action-based handlers
     const actionHandler = ACTION_HANDLERS[String(request.action || '')];
     if (actionHandler) return actionHandler(ctx);
 
+    // 2. Check type-based handlers
     const type = String(request.type || '');
     const typeHandler = TYPE_HANDLERS[type];
     if (typeHandler) return typeHandler(ctx);
+
+    // 3. Check video stage messages (progress, cancel, finish) from offscreen
     if (type.startsWith('videoStage')) return handleVideoStageMessage(ctx);
 
     return undefined;
 }
 
+/**
+ * Root Chrome Extension message listener.
+ *
+ * HOW IT WORKS:
+ * - Registered on `chrome.runtime.onMessage`.
+ * - Returning `true` informs Chrome that `sendResponse` will be called asynchronously!
+ * - Catches any uncaught Promise rejections and replies with `{ success: false, error }`.
+ */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleRuntimeMessage(request, sender)
         .then(sendResponse)
         .catch(error => sendResponse({ success: false, error: error?.message || String(error) }));
-    return true;
+    return true; // Keep message channel open for async response
 });
