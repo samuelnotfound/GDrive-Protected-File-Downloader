@@ -70,33 +70,15 @@ function startDownloadWarmupMonitor(jobId, tabId, request = {}, attempt = 0) {
     };
     activeDownloadMonitors.set(jobId, monitor);
 
-    const totalSec = Math.round(WARMUP_DURATION_MS / 1000);
-
-    // Countdown messages during warmup (10…1).
-    for (let remaining = totalSec; remaining >= 1; remaining--) {
-        const timer = setTimeout(() => {
-            const current = activeDownloadMonitors.get(jobId);
-            if (!current || current.finished) return;
-            sendTab(tabId, {
-                type: 'videoStageWarmup',
-                jobId,
-                remainingSec: remaining,
-                totalSec
-            }).catch?.(() => {});
-        }, (totalSec - remaining) * 1000);
-        monitor.timers.push(timer);
-    }
-
-    // After warmup: unlock normal download UI and keep downloading.
+    // After warmup window: tell UI the connection check phase is done.
     const afterWarmup = setTimeout(() => {
         const current = activeDownloadMonitors.get(jobId);
         if (!current || current.finished) return;
-
         sendTab(tabId, {
             type: 'videoStageWarmup',
             jobId,
             remainingSec: 0,
-            totalSec,
+            totalSec: Math.round(WARMUP_DURATION_MS / 1000),
             phase: 'done'
         }).catch?.(() => {});
     }, WARMUP_DURATION_MS);
@@ -170,7 +152,7 @@ async function evaluateSlowStartAndMaybeRestart(jobId) {
             _restartAttempt: nextAttempt
         });
     } catch (error) {
-        console.error('[GDrive SW] Slow-start restart failed:', error);
+        
     }
 }
 
@@ -205,7 +187,7 @@ function queueSessionMutation(tabId, mutator) {
         await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions;
     });
-    sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
+    sessionsQueue = task.catch(() => {});
     return task;
 }
 
@@ -225,7 +207,7 @@ async function setStoredSession(tabId, value) {
         await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
         return sessions[key];
     });
-    sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
+    sessionsQueue = task.catch(() => {});
     return task;
 }
 
@@ -237,7 +219,7 @@ async function clearStoredSession(tabId) {
         delete sessions[key];
         await chrome.storage.local.set({ [STREAM_STORE_KEY]: sessions });
     });
-    sessionsQueue = task.catch(error => console.error('[GDrive SW] Session storage update failed:', error));
+    sessionsQueue = task.catch(() => {});
     return task;
 }
 
@@ -262,7 +244,7 @@ function queueJobMutation(mutator) {
         if (changed !== false) await chrome.storage.local.set({ [JOB_STORE_KEY]: jobs });
         return jobs;
     });
-    jobsQueue = task.catch(error => console.error('[GDrive SW] Stage job storage update failed:', error));
+    jobsQueue = task.catch(() => {});
     return task;
 }
 

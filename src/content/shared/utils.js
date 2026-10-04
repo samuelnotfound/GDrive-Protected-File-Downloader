@@ -51,18 +51,6 @@
         }
     }
 
-    function muteMedia(element) {
-        try {
-            element.muted = true;
-            element.defaultMuted = true;
-            element.volume = 0;
-            element.setAttribute('muted', '');
-        } catch (_) {}
-    }
-
-    function muteAllMedia() {
-        for (const media of mediaElements('video, audio')) muteMedia(media);
-    }
 
     async function waitUntil(check, timeoutMs, intervalMs = 25) {
         const deadline = Date.now() + timeoutMs;
@@ -80,8 +68,6 @@
         isVisible,
         mediaElements,
         areaOf,
-        muteMedia,
-        muteAllMedia,
         waitUntil
     });
 })();

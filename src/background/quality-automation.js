@@ -38,18 +38,17 @@ async function clickMenuLikeMini(tabId, labels, labelName, timeoutMs, reveal = f
 }
 
 async function selectQualityVerified(tabId, label, height, timeoutMs, preferredFrameId = null) {
-    const candidates = [label, `${label} resolution`, `${label} quality`, height ? `${height}p` : '']
-        .filter(Boolean);
     const deadline = Date.now() + Math.max(1500, Number(timeoutMs) || 7000);
     const frameScope = Number.isInteger(preferredFrameId) ? { frameId: Number(preferredFrameId) } : {};
 
     while (Date.now() < deadline) {
+        // clickQuality already opens Settings → Quality → option (+ direct fallback).
         const viaQuality = firstOk(await runQualityDom(tabId, 'clickQuality', {
             height: Number(height) || 0,
             label,
         }, frameScope));
         if (viaQuality?.value?.ok) {
-            await sleep(250);
+            await sleep(200);
             return {
                 ok: true,
                 frameId: viaQuality.frameId,
@@ -57,21 +56,7 @@ async function selectQualityVerified(tabId, label, height, timeoutMs, preferredF
                 method: 'clickQuality'
             };
         }
-
-        const viaLabel = firstOk(await runQualityDom(tabId, 'clickLabel', {
-            labels: candidates,
-            reveal: false
-        }, frameScope));
-        if (viaLabel?.value?.ok) {
-            await sleep(250);
-            return {
-                ok: true,
-                frameId: viaLabel.frameId,
-                label: viaLabel.value.label || label,
-                method: 'clickLabel'
-            };
-        }
-        await sleep(120);
+        await sleep(150);
     }
     return { ok: false, reason: `Could not select ${label}.` };
 }

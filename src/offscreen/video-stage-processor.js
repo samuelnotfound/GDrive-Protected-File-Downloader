@@ -34,7 +34,7 @@
                 worker.onmessage = event => {
                     const data = event.data || {};
                     if (data.type === 'status') {
-                        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'merge', message: data.message });
+                        // merge status messages omitted — progress events are enough
                         return;
                     }
                     if (data.type === 'ffmpeg-progress') {
@@ -97,7 +97,7 @@
 
     async function processSingle(job, mediaBlob) {
         downloader.throwIfCancelled(job.jobId);
-        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing', message: 'Preparing selected quality…' });
+        downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing' });
         const type = String(job.mediaMime || 'video/mp4').toLowerCase();
         const blob = type.includes('mp4') ? mediaBlob : new Blob([mediaBlob], { type: type || 'video/mp4' });
         await triggerDownload(blob, job.filename, job.jobId);

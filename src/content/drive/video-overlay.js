@@ -301,7 +301,8 @@
     }
     function streamLine(label, received, total) {
         const r = Math.max(0, Number(received) || 0);
-        const t = Math.max(0, Number(total) || 0);
+        // Drive often under-reports clen / Content-Range; never show received > total.
+        const t = Math.max(0, Number(total) || 0, r);
         if (t > 0) return `${label}: ${formatBytes(r)} / ${formatBytes(t)}`;
         if (r > 0) return `${label}: ${formatBytes(r)}`;
         return `${label}: —`;
@@ -323,16 +324,6 @@
                 streamLine('Audio', state.audio.received, state.audio.total)
             );
         }
-        return '';
-    }
-    function formatSeparateEstimates() {
-        const hasVideo = state.video.total > 0;
-        const hasAudio = state.audio.total > 0;
-        if (hasVideo && hasAudio) {
-            return `Video: ${formatBytes(state.video.total)}\nAudio: ${formatBytes(state.audio.total)}`;
-        }
-        if (hasVideo) return `Video: ${formatBytes(state.video.total)}`;
-        if (hasAudio) return `Audio: ${formatBytes(state.audio.total)}`;
         return '';
     }
     function downloadOverallPercent() {
@@ -515,12 +506,20 @@
         }
 
         if (msg.label === 'video' || msg.label === 'audio') {
+            // Ignore late progress after the job has already finished/cancelled.
+            // clearJob() nulls jobId before the terminal stage update, so without
+            // this guard the overlay keeps rewriting numbers after "Video downloaded".
+            if (['ready', 'cancelled', 'error'].includes(state.stage)) return;
+
             const bucket = state[msg.label];
             bucket.received = Math.max(bucket.received, Number(msg.received) || 0);
-            if (!state[msg.label].total && msg.total != null) {
-                const fallbackTotal = Math.max(0, Number(msg.total) || 0);
-                bucket.total = fallbackTotal;
-            }
+            const reportedTotal = Math.max(0, Number(msg.total) || 0);
+            // Prefer a larger total whenever one arrives (Content-Range often
+            // corrects an undersized clen from the original stream URL).
+            if (reportedTotal > bucket.total) bucket.total = reportedTotal;
+            // Keep total at least as large as received so the UI never shows inverted figures.
+            if (bucket.received > bucket.total) bucket.total = bucket.received;
+
             const percent = downloadOverallPercent();
             if (state.stage === 'download') setRing(percent * DOWNLOAD_WEIGHT * 100);
 

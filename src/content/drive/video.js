@@ -5,6 +5,7 @@
     const app = window.__PSD;
     const video = app.videoState;
     const VIDEO_MENU_ID = app.ids.videoMenu;
+    const VIDEO_CONTROLS_ID = 'psd-protected-video-controls';
     const videoOverlay = window.GDriveVideoOverlay;
     const core = app.videoCore;
     const quality = app.videoQuality;
@@ -112,12 +113,32 @@
 
     function configureVideoMenuItem(item) {
         item.classList.add('psd-video-download-item');
-        item.querySelector('[jsname="K4r5Ff"]')?.classList.add('psd-video-menu-label');
-        const label = item.querySelector('.psd-video-menu-label');
-        if (label) label.textContent = 'Download';
-
+        const label = app.ui.findPrimaryLabel(item);
+        if (label) {
+            label.classList.add('psd-video-menu-label');
+            label.textContent = 'Download';
+            label.style.visibility = 'visible';
+        }
         app.ui.addMenuDescription(item, 'psd-video-menu-label', 'psd-video-menu-info', 'GDrive Protected File Downloader');
         app.ui.setDownloadMenuItemIcon(item);
+        // Icon host was hidden with Share's non-label chrome — show it again.
+        item.querySelectorAll('svg, img, [aria-hidden="true"]').forEach(el => {
+            el.style.visibility = 'visible';
+            let p = el.parentElement;
+            while (p && p !== item) {
+                p.style.visibility = 'visible';
+                p = p.parentElement;
+            }
+        });
+        const info = item.querySelector('.psd-video-menu-info');
+        if (info) {
+            info.style.visibility = 'visible';
+            let p = info.parentElement;
+            while (p && p !== item) {
+                p.style.visibility = 'visible';
+                p = p.parentElement;
+            }
+        }
         app.ui.styleDownloadMenuItem(item, '1');
         app.ui.handleMenuKeyboardActivation(item, event => {
             event.preventDefault();
@@ -126,25 +147,44 @@
         });
     }
 
-    // Own-text finder (same idea as the quality-changer prototype): more reliable
-    // than aria/tooltip matching when Drive rewrites menu structure.
-    function ownText(el) {
-        return [...(el?.childNodes || [])]
-            .filter(n => n.nodeType === 3)
-            .map(n => n.nodeValue)
-            .join('')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
+    // Find Share by visible own-text (reference style) — never jsname.
     function findShareInMenu(menu) {
-        const byUi = app.ui.findShareRow(menu);
-        if (byUi) return byUi;
-        for (const item of menu.querySelectorAll('[role="menuitem"], li')) {
-            const label = item.querySelector('[jsname="K4r5Ff"]');
-            if (label && ownText(label) === 'Share') return item;
-            if (ownText(item) === 'Share') return item;
-        }
-        return app.ui.findMenuRow(menu, 'Share');
+        return app.ui.findShareRow(menu) || app.ui.findMenuRow(menu, 'Share');
+    }
+
+    // Align control block text with Share's label (from menu+quality reference).
+    function alignVideoControls(shareRow, shareLabel, labelRow, controlBlock) {
+        if (!labelRow?.isConnected || !controlBlock?.isConnected || !shareLabel) return;
+        const box = shareRow.getBoundingClientRect();
+        if (!box.width) return;
+        const scale = (shareRow.offsetWidth ? box.width / shareRow.offsetWidth : 1) || 1;
+        try {
+            const range = document.createRange();
+            range.selectNodeContents(shareLabel);
+            const textLeft = range.getBoundingClientRect().left;
+            const dx = (textLeft - controlBlock.getBoundingClientRect().left) / scale;
+            if (dx >= 8 && dx <= 160) {
+                controlBlock.style.paddingLeft = `${Math.round(dx)}px`;
+            }
+        } catch (_) {}
+    }
+
+    function makeVideoControlBlock(shareLabel) {
+        const style = shareLabel ? getComputedStyle(shareLabel) : null;
+        const block = document.createElement('div');
+        block.id = VIDEO_CONTROLS_ID;
+        block.setAttribute('data-psd', '');
+        block.setAttribute('data-psd-menu', 'controls');
+        Object.assign(block.style, {
+            display: 'block',
+            padding: '2px 16px 10px 56px',
+            color: style?.color || 'inherit',
+            fontFamily: style?.fontFamily || 'inherit',
+            fontSize: '13px',
+            cursor: 'default',
+            boxSizing: 'border-box'
+        });
+        return block;
     }
 
     function addProtectedVideoMenuItem(menu) {
@@ -156,33 +196,41 @@
         if (app.ui.findMenuRow(menu, 'Print') || app.ui.findMenuRow(menu, 'Download')) return false;
 
         const shareRow = findShareInMenu(menu);
-        const templateRow = app.ui.findMenuRow(menu, 'Details') ||
+        const templateRow = shareRow ||
+            app.ui.findMenuRow(menu, 'Details') ||
             app.ui.findMenuRow(menu, 'Add to starred') ||
-            shareRow ||
             securityRow;
+        if (!templateRow) return false;
+
+        // 1) Label row — inert clone of Share (reference: makeLabelRow).
         const item = app.ui.makeStandaloneMenuRow(templateRow, VIDEO_MENU_ID, 'Download');
         if (!item) return false;
-
-        // Strip more Drive action attrs so the row is fully inert (prototype style).
-        for (const el of [item, ...item.querySelectorAll('*')]) {
-            for (const { name } of [...el.attributes]) {
-                if (/^(jsaction|jscontroller|jsmodel|data-id|data-tooltip|data-tooltip-class)$/i.test(name)) {
-                    el.removeAttribute(name);
-                }
-            }
-        }
-        item.setAttribute('role', 'menuitem');
-        item.setAttribute('tabindex', '0');
+        item.setAttribute('data-psd', '');
         item.setAttribute('data-psd-menu', 'download');
-
+        item.removeAttribute('aria-haspopup');
+        item.removeAttribute('aria-expanded');
         configureVideoMenuItem(item);
 
-        // Insert directly after Share when possible (prototype placement).
-        if (shareRow?.parentNode) {
-            shareRow.parentNode.insertBefore(item, shareRow.nextSibling);
+        // 2) Control block — sibling under the label (reference: makeControlRow / makeBlock).
+        const shareLabel =
+            (shareRow && (app.ui.findLabel(shareRow, 'Share') || app.ui.findPrimaryLabel(shareRow))) ||
+            app.ui.findPrimaryLabel(templateRow);
+        const controls = makeVideoControlBlock(shareLabel);
+
+        // Insert after Share: label row + controls (reference: item.after(...rows)).
+        const anchor = shareRow || securityRow;
+        if (typeof anchor.after === 'function') {
+            anchor.after(item, controls);
+        } else if (anchor.parentNode) {
+            anchor.parentNode.insertBefore(item, anchor.nextSibling);
+            item.parentNode.insertBefore(controls, item.nextSibling);
         } else {
-            app.ui.insertAfterReference(securityRow.parentNode, item, shareRow || null);
+            return false;
         }
+
+        const place = () => alignVideoControls(shareRow || item, shareLabel, item, controls);
+        place();
+        setTimeout(place, 300);
         return true;
     }
 
@@ -297,16 +345,11 @@
                 return;
             }
 
-            // 2) Fallback: open Settings → Quality and scan ARIA labels (existing flow).
-            let response = null;
-            for (let attempt = 0; attempt < 2; attempt++) {
-                response = await core.sendRuntime({
-                    action: 'listPlayerQualityLabels',
-                    fileId: video.fileId
-                });
-                if (response?.success && (response.options?.length || response.formats?.video?.length)) break;
-                await new Promise(r => setTimeout(r, 600));
-            }
+            // 2) Fallback: open Settings → Quality and scan menu labels.
+            const response = await core.sendRuntime({
+                action: 'listPlayerQualityLabels',
+                fileId: video.fileId
+            });
 
             const options = Array.isArray(response?.options) ? response.options : [];
             if (response?.success && options.length) {
@@ -347,7 +390,6 @@
     }
 
     async function startVideoFromMenu() {
-        core.muteMediaImmediately();
         if (video.operation === 'staging' || video.operation === 'scanning' || videoOverlay.getJobId?.()) return;
         if (video.operation !== 'idle') return;
 
@@ -453,9 +495,25 @@
         if (window.__PSD_VIDEO_MENU_CLICK_GUARD) return;
         window.__PSD_VIDEO_MENU_CLICK_GUARD = true;
 
+        // Reference-style: stop Drive from seeing pointer/focus events on our rows
+        // so the File menu does not close or swallow our controls.
+        const inOurs = n => (n instanceof Element ? n.closest('[data-psd], #' + VIDEO_MENU_ID + ', #psd-video-quality-picker, #psd-video-quality-menu') : null);
+
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup']) {
+            window.addEventListener(type, e => {
+                if (!inOurs(e.target)) return;
+                e.stopImmediatePropagation();
+                if (type === 'mousedown') e.preventDefault();
+            }, true);
+        }
+        for (const type of ['focusin', 'focusout', 'focus', 'blur']) {
+            window.addEventListener(type, e => {
+                if (inOurs(e.target) || inOurs(e.relatedTarget)) e.stopImmediatePropagation();
+            }, true);
+        }
+
         const activate = (item, event) => {
             if (!item || event.target?.closest?.('#psd-video-quality-picker') || video.operation !== 'idle') return;
-            // Not playing → swallow click, keep button disabled.
             if (!isPlaybackReadyForDownload()) {
                 event.preventDefault();
                 event.stopImmediatePropagation();
@@ -463,7 +521,6 @@
                 updateVideoMenuState();
                 return;
             }
-            core.muteMediaImmediately();
             event.preventDefault();
             event.stopImmediatePropagation();
             event.stopPropagation();
@@ -472,12 +529,13 @@
             void startVideoFromMenu();
         };
 
-        document.addEventListener('pointerdown', event => {
-            const item = event.target?.closest?.('#' + VIDEO_MENU_ID);
-            if (item && item.dataset.activationInProgress !== 'true') activate(item, event);
-        }, true);
         document.addEventListener('click', event => {
-            if (event.target?.closest?.('#psd-video-quality-picker')) return;
+            if (event.target?.closest?.('#psd-video-quality-picker') ||
+                event.target?.closest?.('#psd-protected-video-controls')) {
+                // Picker buttons handle their own clicks; keep Drive out.
+                event.stopImmediatePropagation();
+                return;
+            }
             const item = event.target?.closest?.('#' + VIDEO_MENU_ID);
             if (item && item.dataset.activationInProgress !== 'true') activate(item, event);
         }, true);

@@ -52,10 +52,8 @@ async function waitForQualityStream(tabId, probeToken, height, waitMs, usedUrls 
 }
 
 async function nudgePlaybackAfterQualitySwitch(tabId) {
-    try { await runQualityDom(tabId, 'nudgePlayback', { seconds: 1.25 }); } catch (_) {}
+    try { await runQualityDom(tabId, 'nudgePlayback', { seconds: 1 }); } catch (_) {}
     try { await resumePlaybackAfterQualitySwitch(tabId); } catch (_) {}
-    await sleep(200);
-    try { await runQualityDom(tabId, 'nudgePlayback', { seconds: 0.5 }); } catch (_) {}
 }
 
 async function lockSharedAudioOnSession(tabId, audio) {

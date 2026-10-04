@@ -201,19 +201,8 @@ function storeCandidateInSession(tabId, session, candidate) {
 
         const activeProbe = current.activeQualityProbe;
         if (activeProbe && Number(candidate.capturedAt) >= Number(activeProbe.startedAt || 0)) {
-            candidate.probeQuality = activeProbe.label || candidate.probeQuality || '';
-            candidate.probeToken = activeProbe.token || candidate.probeToken || '';
-            const labelHeight = Number(String(activeProbe.label || '').match(/(\d{3,4})p/i)?.[1] || 0);
-            if (labelHeight && classifySimple(candidate.originalUrl || candidate.url, candidate) !== 'audio') {
-                if (!Number(candidate.height || 0)) {
-                    candidate.height = labelHeight;
-                    candidate.heightSource = 'probe';
-                }
-                if (!Number(candidate.qualityHeight || 0)) {
-                    candidate.qualityHeight = Number(candidate.height || labelHeight);
-                }
-                candidate.probeHeight = labelHeight;
-            }
+            // Single source of truth for probe stamping (same logic used by the in-memory path).
+            tagCandidateWithProbe(candidate, activeProbe);
             current.probeCandidates = addUniqueCandidate(current.probeCandidates, candidate, PROBE_BUFFER_LIMIT);
         }
 

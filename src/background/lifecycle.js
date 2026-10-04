@@ -41,13 +41,6 @@ async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {
     try { await clearStoredSession(tabId); } catch (_) {}
     try { clearStreamCaptureState(tabId); } catch (_) {}
     try {
-        if (typeof QUALITY_SCAN_RUNNING !== 'undefined') {
-            for (const key of [...QUALITY_SCAN_RUNNING.keys()]) {
-                if (String(key).startsWith(String(tabId) + '|') || String(key) === String(tabId)) {
-                    QUALITY_SCAN_RUNNING.delete(key);
-                }
-            }
-        }
         if (typeof QUALITY_SCAN_TAB_LOCK !== 'undefined') QUALITY_SCAN_TAB_LOCK.delete(tabId);
     } catch (_) {}
 

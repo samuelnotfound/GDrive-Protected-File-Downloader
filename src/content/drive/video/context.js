@@ -265,9 +265,6 @@
         return name;
     }
 
-    function muteMediaImmediately() {
-        // Auto-mute disabled per user request
-    }
 
     function setVideoPlaybackStarted(started = true) {
         if (!started || video.playbackStarted) return;
@@ -317,7 +314,6 @@
         updateCapturedVideoFilename,
         isVisibleVideoElement,
         collectVideoElements,
-        muteMediaImmediately,
         setVideoPlaybackStarted,
         isCurrentVideoMessage,
         isTrustedPageOrigin,

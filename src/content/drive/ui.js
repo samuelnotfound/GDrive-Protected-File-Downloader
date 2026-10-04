@@ -44,40 +44,97 @@
     const isPDFBusy = () => pdf.status === 'capturing' || pdf.status === 'processing';
 
     const normalizeMenuText = value => String(value).replace(/\s+/g, ' ').trim();
-    const getMenuLabel = item => normalizeMenuText(
-        item.querySelector('[jsname="K4r5Ff"]')?.textContent || item.textContent || ''
-    );
+
+    // Text-node helpers (same idea as the menu+quality reference). No jsname / data-* selectors.
+    const ownText = el =>
+        [...(el?.childNodes || [])]
+            .filter(n => n.nodeType === 3)
+            .map(n => n.nodeValue)
+            .join('')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+    const findLabel = (root, text) => {
+        const target = normalizeMenuText(text);
+        if (!root || !target) return null;
+        return [root, ...root.querySelectorAll('*')].find(el => ownText(el) === target) || null;
+    };
+
+    // First short own-text node under a menuitem — the visible label, not shortcut/meta.
+    const findPrimaryLabel = root => {
+        if (!root) return null;
+        for (const el of [root, ...root.querySelectorAll('*')]) {
+            const t = ownText(el);
+            if (t && t.length > 0 && t.length < 48) return el;
+        }
+        return null;
+    };
+
+    const getMenuLabel = item => {
+        const primary = findPrimaryLabel(item);
+        if (primary) return normalizeMenuText(ownText(primary));
+        return normalizeMenuText(item?.textContent || '');
+    };
+
     function findMenuRow(menu, wanted) {
         const target = normalizeMenuText(wanted).toLowerCase();
         const candidates = [
             ...menu.querySelectorAll('[role="menuitem"]'),
             ...menu.querySelectorAll('li'),
-            ...menu.querySelectorAll('[data-tooltip]')
+            ...menu.querySelectorAll('[role="option"]')
         ];
         return candidates.find(el => el !== menu && getMenuLabel(el).toLowerCase() === target) || null;
     }
     const findShareRow = menu => findMenuRow(menu, 'Share');
+
     function insertAfterReference(parent, node, reference) {
         if (!node) return;
         if (reference?.parentNode) {
-            reference.parentNode.insertBefore(node, reference.nextSibling);
+            // Prefer native after() (reference style).
+            if (typeof reference.after === 'function') reference.after(node);
+            else reference.parentNode.insertBefore(node, reference.nextSibling);
         } else if (parent) {
             parent.appendChild(node);
         }
     }
+
+    // Strip Drive's action/identity attrs the way the reference does (js*, data-*, aria-*).
+    const STRIP_ATTR = /^(id|role|tabindex|js.*|data-.*|aria-.*)$/i;
+
     function makeStandaloneMenuRow(source, id, label) {
         if (!source) return null;
         const item = source.cloneNode(true);
-        item.id = id;
-        for (const attr of ['jsaction','jscontroller','jsmodel','data-id','data-tooltip','data-tooltip-class','aria-disabled','disabled','aria-haspopup']) {
-            item.removeAttribute(attr);
+        for (const el of [item, ...item.querySelectorAll('*')]) {
+            for (const { name } of [...el.attributes]) {
+                if (STRIP_ATTR.test(name)) el.removeAttribute(name);
+            }
         }
+        item.id = id;
         item.setAttribute('role', 'menuitem');
         item.setAttribute('tabindex', '0');
         item.setAttribute('aria-label', label);
-        const labelNode = item.querySelector('[jsname="K4r5Ff"]');
+
+        // Prefer replacing the template's own label text (e.g. "Share"); else first primary label.
+        const labelNode =
+            findLabel(item, getMenuLabel(source)) ||
+            findPrimaryLabel(item);
         if (labelNode) {
             labelNode.textContent = label;
+            // Reference-style: hide everything that is not the label (submenu >, shortcuts, etc.).
+            for (const el of item.querySelectorAll('*')) {
+                el.style.pointerEvents = 'none';
+                if (el === labelNode || el.contains(labelNode) || labelNode.contains(el)) continue;
+                el.style.visibility = 'hidden';
+            }
+            labelNode.style.visibility = 'visible';
+            labelNode.style.pointerEvents = 'none';
+            // Keep ancestors of the label visible so layout is preserved.
+            let p = labelNode.parentElement;
+            while (p && p !== item) {
+                p.style.visibility = 'visible';
+                p = p.parentElement;
+            }
+            item.style.pointerEvents = 'auto';
         } else {
             const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
             while (walker.nextNode()) {
@@ -87,8 +144,6 @@
                 }
             }
         }
-        const shortcut = item.querySelector('[jsname="orbTae"]');
-        if (shortcut) shortcut.textContent = '';
         return item;
     }
     function getVisibleFileMenus() {
@@ -158,7 +213,7 @@
         });
     }
     function addMenuDescription(item, labelClass, infoClass, text) {
-        const label = item.querySelector('[jsname="K4r5Ff"]');
+        const label = item.querySelector(`.${labelClass}`) || findPrimaryLabel(item);
         if (!label || item.querySelector(`.${infoClass}`)) return;
         label.classList.add(labelClass);
         const parent = label.parentElement;
@@ -358,6 +413,10 @@
     app.sendAction = sendAction;
     app.isDrivePage = isDrivePage;
     app.ui = {
+        ownText,
+        findLabel,
+        findPrimaryLabel,
+        getMenuLabel,
         findMenuRow,
         findShareRow,
         insertAfterReference,

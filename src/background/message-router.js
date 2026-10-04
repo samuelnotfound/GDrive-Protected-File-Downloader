@@ -209,14 +209,15 @@ async function handlePageStreamDetected({ request, tabId }) {
 
         const probe = current.activeQualityProbe;
         if (probe) {
-            candidate.probeQuality = probe.label || candidate.probeQuality || '';
-            candidate.probeToken = probe.token || candidate.probeToken || '';
-            const labelHeight = Number(String(probe.label || '').match(/(\d{3,4})p/i)?.[1] || 0);
-            if (labelHeight && !isAudioStream(candidate)) {
-                candidate.qualityHeight = labelHeight;
-                candidate.probeHeight = labelHeight;
-            }
-            current.probeCandidates = [candidate, ...(Array.isArray(current.probeCandidates) ? current.probeCandidates : [])].slice(0, 32);
+            // Use the shared probe stamp helper so page-bridge and webRequest
+            // paths never diverge on height / token handling.
+            tagCandidateWithProbe(candidate, probe);
+            const limit = (typeof PROBE_BUFFER_LIMIT === 'number') ? PROBE_BUFFER_LIMIT : 48;
+            current.probeCandidates = addUniqueCandidate(
+                Array.isArray(current.probeCandidates) ? current.probeCandidates : [],
+                candidate,
+                limit
+            );
         }
 
         // Simple-plugin classification: mime=audio in URL, else itag/isAudioStream.
@@ -264,77 +265,64 @@ async function handleListPlayerQualityLabels({ request, tabId }) {
     const QUALITY = ['quality', 'video quality', 'quality settings'];
 
     try {
-        await runQualityDom(tabId, 'enableMuteGuard');
-
         // Playback is the user's job — no autoplay. Open Settings → Quality and
         // read every quality row at once (same as Drive Quality Trigger).
 
         let options = [];
         let lastError = '';
 
-        for (let attempt = 0; attempt < 3 && !options.length; attempt++) {
+        for (let attempt = 0; attempt < 2 && !options.length; attempt++) {
             await closePlayerMenu(tabId);
-            await sleep(200 + attempt * 150);
+            await sleep(150 + attempt * 100);
             try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
-            await sleep(200);
 
-            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 8000, true);
+            const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 5000, true);
             if (!settings?.ok) {
                 lastError = settings?.reason || 'Could not open Settings.';
                 continue;
             }
-            await sleep(500);
+            await sleep(300);
 
             const quality = await clickMenuLikeMini(
-                tabId, QUALITY, 'Quality', 8000, false,
+                tabId, QUALITY, 'Quality', 5000, false,
                 Number.isInteger(settings.frameId) ? settings.frameId : null
             );
             if (!quality?.ok) {
                 lastError = quality?.reason || 'Could not open Quality menu.';
                 continue;
             }
-            await sleep(500);
+            await sleep(300);
 
-            // Scan ALL quality labels at once while the submenu is open (all frames).
-            const deadline = Date.now() + 6000;
+            // Scan quality labels while the submenu is open.
+            const deadline = Date.now() + 4000;
             while (Date.now() < deadline) {
-            const rows = await runQualityDom(tabId, 'scanQualities');
-            const byHeight = new Map();
-            for (const row of rows || []) {
-                const value = row?.value;
-                // Our content returns { ok, options, labels }
-                const list = Array.isArray(value?.options) ? value.options
-                    : Array.isArray(value) ? value
-                    : [];
-                for (const opt of list) {
-                    if (typeof opt === 'string') {
-                        const height = Number(String(opt).match(/(\d{3,4})p/i)?.[1] || 0);
-                        if (!height) continue;
-                        byHeight.set(height, {
-                            height,
-                            label: String(opt).trim(),
-                            selected: false
-                        });
-                        continue;
+                const rows = await runQualityDom(tabId, 'scanQualities');
+                const byHeight = new Map();
+                for (const row of rows || []) {
+                    const value = row?.value;
+                    const list = Array.isArray(value?.options) ? value.options
+                        : Array.isArray(value) ? value
+                        : [];
+                    for (const opt of list) {
+                        if (typeof opt === 'string') {
+                            const h = Number(String(opt).match(/(\d{3,4})p/i)?.[1] || 0);
+                            if (h) byHeight.set(h, { height: h, label: String(opt).trim(), selected: false });
+                            continue;
+                        }
+                        const h = Number(opt?.height || 0);
+                        if (!h) continue;
+                        const lab = String(opt.text || opt.label || `${h}p`).trim();
+                        const prev = byHeight.get(h);
+                        if (!prev || opt.selected) byHeight.set(h, { height: h, label: lab, selected: !!opt.selected });
                     }
-                    const height = Number(opt?.height || 0);
-                    if (!height) continue;
-                    const label = String(opt.text || opt.label || `${height}p`).trim();
-                    const prev = byHeight.get(height);
-                    if (!prev || opt.selected) {
-                        byHeight.set(height, { height, label, selected: !!opt.selected });
-                    }
-                }
-                // Also accept plain labels array from content
-                for (const lab of (value?.labels || [])) {
-                    const height = Number(String(lab).match(/(\d{3,4})p/i)?.[1] || 0);
-                    if (!height) continue;
-                    if (!byHeight.has(height)) {
-                        byHeight.set(height, { height, label: String(lab).trim(), selected: false });
+                    for (const lab of (value?.labels || [])) {
+                        const h = Number(String(lab).match(/(\d{3,4})p/i)?.[1] || 0);
+                        if (h && !byHeight.has(h)) {
+                            byHeight.set(h, { height: h, label: String(lab).trim(), selected: false });
+                        }
                     }
                 }
-            }
-            options = [...byHeight.values()].sort((a, b) => b.height - a.height);
+                options = [...byHeight.values()].sort((a, b) => b.height - a.height);
                 if (options.length) break;
                 await sleep(120);
             }
@@ -342,7 +330,6 @@ async function handleListPlayerQualityLabels({ request, tabId }) {
             await closePlayerMenu(tabId);
             if (options.length) break;
             lastError = lastError || 'No quality options were found in the menu.';
-            await sleep(300);
         }
 
         if (!options.length) {
@@ -375,7 +362,6 @@ async function handleListPlayerQualityLabels({ request, tabId }) {
     } catch (error) {
         return { success: false, error: error?.message || 'Failed to list quality labels.', options: [] };
     } finally {
-        try { await runQualityDom(tabId, 'releaseMuteGuard'); } catch (_) {}
     }
     })();
 
@@ -410,61 +396,21 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
 
     const work = (async () => {
         try {
-            await runQualityDom(tabId, 'enableMuteGuard');
-
-            // Quality selection mirrors the quality-changer prototype:
-            // press(Settings gear) → press(Quality) → press(resolution option)
-            // via content-script clickQuality (full pointer sequence + own-text find).
+                // clickQuality presses Settings → Quality → resolution (with its own fallbacks).
             const clickAt = Date.now();
-            const names = [label, `${label} resolution`, `${label} quality`, height ? `${height}p` : '']
-                .filter(Boolean);
 
             await closePlayerMenu(tabId);
             await sleep(120);
             try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
-            await sleep(150);
+            await sleep(100);
 
-            // Primary: one-shot setQuality-style clickQuality in the page.
-            let selected = await selectQualityVerified(
-                tabId, label || `${height}p`, height, 9000, null
+            // clickQuality (content) already does Settings → Quality → option
+            // plus a direct-option fallback. One verified pass is enough.
+            const selected = await selectQualityVerified(
+                tabId, label || `${height}p`, height, 8000, null
             );
-
-            // Fallback: explicit Settings → Quality → label (older path).
             if (!selected?.ok) {
-                const SETTINGS = ['settings', 'settings menu', 'player settings', 'video settings', 'open settings'];
-                const QUALITY = ['quality', 'video quality', 'quality settings'];
-                await closePlayerMenu(tabId);
-                await sleep(100);
-                try { await runQualityDom(tabId, 'revealControls'); } catch (_) {}
-                const settings = await clickMenuLikeMini(tabId, SETTINGS, 'Settings', 7000, true);
-                if (settings?.ok) {
-                    await sleep(350);
-                    const quality = await clickMenuLikeMini(
-                        tabId, QUALITY, 'Quality', 7000, false,
-                        Number.isInteger(settings.frameId) ? settings.frameId : null
-                    );
-                    if (quality?.ok) {
-                        await sleep(300);
-                        selected = await selectQualityVerified(
-                            tabId, label || `${height}p`, height, 7000,
-                            Number.isInteger(quality.frameId) ? quality.frameId
-                                : (Number.isInteger(settings.frameId) ? settings.frameId : null)
-                        );
-                    }
-                }
-            }
-
-            if (!selected?.ok) {
-                let clicked = false;
-                const end = Date.now() + 4000;
-                while (Date.now() < end && !clicked) {
-                    const rows = await runQualityDom(tabId, 'clickLabel', { labels: names });
-                    clicked = (rows || []).some(r => r?.value?.ok || r?.value === true);
-                    if (!clicked) await sleep(120);
-                }
-                if (!clicked) {
-                    return { success: false, error: `Could not find ${label || height + 'p'} in the quality menu.` };
-                }
+                return { success: false, error: `Could not find ${label || height + 'p'} in the quality menu.` };
             }
 
             // Harvest whatever is ALREADY playing (same quality → Drive may not
@@ -603,8 +549,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 label
             };
         } finally {
-            try { await runQualityDom(tabId, 'releaseMuteGuard'); } catch (_) {}
-            try { await closePlayerMenu(tabId); } catch (_) {}
+                try { await closePlayerMenu(tabId); } catch (_) {}
         }
     })();
 
@@ -764,11 +709,6 @@ const handleGetStreams = async ({ tabId }) => {
     };
 };
 
-async function handleMuteMediaNow({ tabId }) {
-    if (!Number.isInteger(tabId)) return { success: false, error: 'No active Drive tab.' };
-    await sendTab(tabId, { type: 'PSD_MUTE_MEDIA_NOW' });
-    return { success: true };
-}
 
 const handleDownloadVideo = ({ request, tabId }) => startVideoDownload(tabId, request || {});
 
@@ -829,7 +769,6 @@ const ACTION_HANDLERS = Object.freeze({
     captureQualityForDownload: requireDriveTab(handleCaptureQualityForDownload),
     clearTabCaptureState: requireDriveTab(handleClearTabCaptureState),
     getStreams: handleGetStreams,
-    muteMediaNow: handleMuteMediaNow,
     downloadVideo: handleDownloadVideo
 });
 

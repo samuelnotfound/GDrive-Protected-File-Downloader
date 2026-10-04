@@ -2,7 +2,7 @@
   if (window.__driveQualityTriggerLoaded) return;
   window.__driveQualityTriggerLoaded = true;
 
-  const { sleep, allRoots, isVisible, mediaElements, areaOf, muteMedia } = window.__PSD_CONTENT_UTILS;
+  const { sleep, allRoots, isVisible, mediaElements, areaOf } = window.__PSD_CONTENT_UTILS;
   const norm = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
 
   const OWN_UI = '#psd-video-quality-picker,#psd-video-scan-blocker,#psd-video-page-blocker,#psd-inpage-overlay';
@@ -164,30 +164,6 @@
     return press(el);
   }
 
-  function muteAllMediaNow() {
-    // Auto-mute disabled per user request
-  }
-
-  let muteGuardCleanup = null;
-
-  function setMainWorldMuteGuard(enabled) {
-    try {
-      window.postMessage({ type: 'PSD_MEDIA_MUTE_GUARD', enabled }, '*');
-    } catch (_) {}
-  }
-
-  // Auto-release if background never calls releaseMuteGuard (MV3 SW death mid-flow).
-  const MUTE_GUARD_MAX_MS = 45000;
-  let muteGuardAutoTimer = null;
-
-  function enableMuteGuard() {
-    // Auto-mute disabled per user request
-  }
-
-  function releaseMuteGuard() {
-    // Auto-mute disabled per user request
-  }
-
   function biggestVideo() {
     return mediaElements('video').filter(isVisible).sort((a, b) => areaOf(b) - areaOf(a))[0] || null;
   }
@@ -264,10 +240,6 @@
     }
     return rows;
   }
-
-  chrome.runtime.onMessage.addListener(message => {
-    if (message?.type === 'PSD_MUTE_MEDIA_NOW') muteAllMediaNow();
-  });
 
   window.__driveQualityActions = {
     revealControls: () => ({ ok: revealControls() }),
@@ -448,9 +420,5 @@
       return { ok: videos.some(v => !v.paused && !v.ended) };
     },
 
-    releaseMuteGuard: () => {
-      releaseMuteGuard();
-      return { ok: true };
-    }
   };
 })();

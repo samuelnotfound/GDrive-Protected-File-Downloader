@@ -7,7 +7,6 @@
     const VIDEO_MENU_ID = app.ids.videoMenu;
     const videoOverlay = window.GDriveVideoOverlay;
 
-    const SCAN_VEIL_TEXT = 'Checking video quality';
     let qualityPickerObserver = null;
     let qualityPickerWatchTimer = null;
     let qualityPickerMounting = false;
@@ -79,77 +78,9 @@
         return height ? `${height}p` : (width ? `${width}px` : 'Video');
     };
 
-    let scanCancelled = false;
-
-    function ensureScanPageBlocker() {
-        let root = document.getElementById('psd-video-scan-blocker');
-        if (root) return root;
-
-        root = document.createElement('div');
-        root.id = 'psd-video-scan-blocker';
-        root.setAttribute('role', 'presentation');
-        // Dim and card match other overlays (bottom-right 360px).
-        root.innerHTML = `
-            <style>
-                #psd-video-scan-blocker{
-                    position:fixed !important;inset:0 !important;width:100vw !important;height:100vh !important;
-                    margin:0 !important;padding:0 !important;border:0 !important;
-                    background:rgba(0,0,0,.80) !important;
-                    z-index:2147483646 !important;pointer-events:none !important;display:none !important;
-                    box-sizing:border-box !important;cursor:default !important;user-select:none !important;
-                }
-                #psd-video-scan-blocker[data-open="true"]{pointer-events:auto !important;display:block !important;}
-                #psd-video-scan-card{
-                    position:absolute !important;right:24px !important;bottom:24px !important;left:auto !important;
-                    display:flex !important;align-items:center !important;gap:14px !important;
-                    width:360px !important;max-width:calc(100vw - 32px) !important;box-sizing:border-box !important;
-                    padding:16px 18px !important;border-radius:20px !important;
-                    background:#28292a !important;color:#e3e3e3 !important;
-                    box-shadow:0 4px 16px rgba(0,0,0,.35),0 1px 3px rgba(0,0,0,.2) !important;
-                    font:500 14px/1.4 'Google Sans',Roboto,Arial,sans-serif !important;
-                    pointer-events:auto !important;
-                }
-                #psd-video-scan-card .psd-scan-copy{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1;}
-                #psd-video-scan-card .psd-scan-text{font:500 15px/20px 'Google Sans',Roboto,Arial,sans-serif;color:#e3e3e3;letter-spacing:.1px;}
-                #psd-video-scan-card .psd-scan-hint{font:400 13px/1.4 Roboto,Arial,sans-serif;color:#c4c7c5;}
-                #psd-video-scan-cancel{
-                    flex:0 0 auto;border:none;outline:none;border-radius:20px;padding:7px 18px;
-                    background:rgba(168,199,250,.12);color:#a8c7fa;cursor:pointer;
-                    font:500 13px 'Google Sans',Roboto,sans-serif;
-                }
-                #psd-video-scan-cancel:hover{background:rgba(168,199,250,.22);}
-            </style>
-            <div id="psd-video-scan-card" role="status" aria-live="polite">
-                <div class="psd-scan-copy">
-                    <span class="psd-scan-text">Checking video quality</span>
-                    <span class="psd-scan-hint">This only takes a moment</span>
-                </div>
-                <button id="psd-video-scan-cancel" type="button">Cancel</button>
-            </div>`;
-        document.documentElement.appendChild(root);
-        root.querySelector('#psd-video-scan-cancel').addEventListener('click', () => {
-            scanCancelled = true;
-            hidePageBlocker();
-            try { video.operation = 'idle'; } catch (_) {}
-            try { app.video?.updateMenuState?.(); } catch (_) {}
-        });
-        return root;
-    }
-
-    function isScanCancelled() {
-        return !!scanCancelled;
-    }
-
-    function showPageBlocker(_message = SCAN_VEIL_TEXT) {
-        // Page dim/overlay disabled — quality scan & click run without blocking the page.
-        hidePageBlocker();
-        scanCancelled = false;
-    }
-
-    function hidePageBlocker() {
-        const blocker = document.getElementById('psd-video-scan-blocker');
-        if (blocker) delete blocker.dataset.open;
-    }
+    // Scan page-blocker UI was disabled; keep no-op hooks so call sites stay simple.
+    function showPageBlocker() {}
+    function hidePageBlocker() {}
 
 
     function installInteractionShield() {
@@ -473,7 +404,13 @@
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
 
         const item = menu.querySelector('#' + VIDEO_MENU_ID);
-        return !!item && (root.parentElement === item || item.contains(root));
+        const host = menu.querySelector('#psd-protected-video-controls');
+        // Mounted when picker lives in the control block (reference) or still under the label.
+        return !!item && (
+            (host && (root.parentElement === host || host.contains(root))) ||
+            root.parentElement === item ||
+            item.contains(root)
+        );
     }
 
     function stopWatch() {
@@ -509,18 +446,25 @@
         }
         if (!item?.parentNode || !liveMenu.contains(item)) return false;
 
-        const label = item.querySelector('.psd-video-menu-label');
-        const contentHost = label?.parentElement || item;
-        if (root.parentNode !== contentHost) contentHost.appendChild(root);
+        // Controls mount in the sibling block under the label row (reference layout).
+        let host = liveMenu.querySelector('#psd-protected-video-controls');
+        if (!host) {
+            // Menu was rebuilt without our control block — re-insert.
+            try { await app.video?.addProtectedVideoMenuItem(liveMenu); } catch (_) {}
+            host = liveMenu.querySelector('#psd-protected-video-controls');
+        }
+        if (!host) {
+            // Last resort: append under the label row's parent after the label.
+            host = document.createElement('div');
+            host.id = 'psd-protected-video-controls';
+            host.setAttribute('data-psd', '');
+            item.after(host);
+        }
 
-        app.video?.normalizeQualityMenuItem(item);
-        item.style.setProperty('align-items', 'flex-start', 'important');
-        item.querySelectorAll('.aqdrmf-rymPhb-KkROqb').forEach(host => {
-            host.style.setProperty('align-self', 'flex-start', 'important');
-            host.style.setProperty('margin-top', '3px', 'important');
-        });
-
+        if (root.parentNode !== host) host.appendChild(root);
         root.style.display = 'block';
+        root.style.width = '100%';
+        app.video?.normalizeQualityMenuItem(item);
         app.video?.updateMenuState();
         return true;
     }
@@ -1006,7 +950,6 @@
         video._downloadGuard = true;
 
         try {
-        core.muteMediaImmediately();
 
         if (video.operation === 'staging' || videoOverlay.getJobId?.()) {
             const root = document.getElementById('psd-video-quality-picker');
@@ -1044,15 +987,6 @@
             });
         } catch (e) {
             capture = { success: false, error: e?.message || String(e) };
-        }
-
-        if (scanCancelled) {
-            button.disabled = false;
-            status.textContent = 'Cancelled.';
-            video.operation = 'picker';
-            app.video?.updateMenuState();
-            try { await ensureQualityPickerMounted({ reopenIfMissing: true }); } catch (_) {}
-            return;
         }
 
         if (!capture?.success || !capture.video?.url) {
