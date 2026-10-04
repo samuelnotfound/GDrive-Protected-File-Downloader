@@ -79,6 +79,27 @@ async function removeVideoStageJob(jobId) {
     });
 }
 
+/** Cancel every in-flight stage job that was started from this tab. */
+async function cancelJobsForTab(tabId) {
+    if (!Number.isInteger(tabId)) return;
+    let jobs = {};
+    try { jobs = await getStoredJobs(); } catch (_) { return; }
+    const ids = Object.keys(jobs).filter(id => Number(jobs[id]?.sourceTabId) === Number(tabId));
+    for (const jobId of ids) {
+        const job = jobs[jobId];
+        try {
+            if (typeof cancelVideoStage === 'function') {
+                await cancelVideoStage(jobId, job, { silent: true });
+            } else {
+                try { stopStreamWarmups?.(jobId); } catch (_) {}
+                try { clearDownloadMonitor?.(jobId); } catch (_) {}
+                try { sendOffscreen?.({ type: 'videoStageCancelInternal', jobId }); } catch (_) {}
+                await removeVideoStageJob(jobId);
+            }
+        } catch (_) {}
+    }
+}
+
 function formatBytes(format) {
     return Number(format?.contentLength) || getStreamBytes(format?.url || '');
 }

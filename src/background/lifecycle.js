@@ -38,6 +38,10 @@ function isDriveHost(url) {
  * Called on page refresh and when leaving/changing the Drive file.
  */
 async function clearTabMediaState(tabId, { clearGlobal = true, fileId = '' } = {}) {
+    // Stop any download that was started from this tab (closing tab / leaving page).
+    try {
+        if (typeof cancelJobsForTab === 'function') await cancelJobsForTab(tabId);
+    } catch (_) {}
     try { await clearStoredSession(tabId); } catch (_) {}
     try { clearStreamCaptureState(tabId); } catch (_) {}
     try {
@@ -145,5 +149,9 @@ try {
 
 chrome.tabs.onRemoved.addListener(tabId => {
     TAB_URL_BY_ID.delete(tabId);
-    clearTabMediaState(tabId, { clearGlobal: true });
+    // Fire-and-forget: cancel downloads first, then wipe capture state.
+    (async () => {
+        try { if (typeof cancelJobsForTab === 'function') await cancelJobsForTab(tabId); } catch (_) {}
+        try { await clearTabMediaState(tabId, { clearGlobal: true }); } catch (_) {}
+    })();
 });

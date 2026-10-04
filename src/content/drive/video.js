@@ -624,6 +624,28 @@
         video.lastViewerState = open;
     }
 
+
+    function installLeavePageCancel() {
+        if (window.__PSD_LEAVE_PAGE_CANCEL) return;
+        window.__PSD_LEAVE_PAGE_CANCEL = true;
+
+        const cancelActive = () => {
+            const jobId = videoOverlay?.getJobId?.();
+            if (!jobId) return;
+            try {
+                chrome.runtime.sendMessage({
+                    action: 'videoStageMessage',
+                    type: 'videoStageCancel',
+                    jobId
+                });
+            } catch (_) {}
+        };
+
+        // Tab close / navigate away / reload
+        window.addEventListener('pagehide', cancelActive);
+        window.addEventListener('beforeunload', cancelActive);
+    }
+
     function installDriveFileMenuRestore() {
         if (window.__PSD_FILE_MENU_QUALITY_RESTORE) return;
         window.__PSD_FILE_MENU_QUALITY_RESTORE = true;
@@ -849,6 +871,7 @@
         installVideoMenuClickGuard();
         installPlaybackUnlockWatch();
         installDriveFileMenuRestore();
+        installLeavePageCancel();
         installStreamStorageListener();
         initMessaging();
     }
