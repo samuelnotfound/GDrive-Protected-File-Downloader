@@ -22,21 +22,20 @@
             rejects.delete(jobId);
             return;
         }
-        for (const id of workers.keys()) cancel(id);
+        for (const id of [...workers.keys()]) cancel(id);
     }
 
     async function mergeStreams(job, videoBlob, audioBlob) {
         const worker = new Worker(chrome.runtime.getURL('vendor/mp4-remux-worker.js'));
         workers.set(job.jobId, worker);
+
         try {
             return await new Promise((resolve, reject) => {
                 rejects.set(job.jobId, reject);
+
                 worker.onmessage = event => {
                     const data = event.data || {};
-                    if (data.type === 'status') {
-                        // merge status messages omitted — progress events are enough
-                        return;
-                    }
+                    if (data.type === 'status') return;
                     if (data.type === 'ffmpeg-progress') {
                         downloader.postStageMessage('videoStageMergeProgress', {
                             jobId: job.jobId,
@@ -49,15 +48,16 @@
                     }
                     if (data.type === 'done') {
                         if (!(data.buffer instanceof ArrayBuffer)) {
-                            reject(new Error('FFmpeg returned an invalid MP4 buffer.'));
+                            reject(new Error('Remux returned an invalid MP4 buffer.'));
                             return;
                         }
                         resolve(new Blob([data.buffer], { type: 'video/mp4' }));
                         return;
                     }
-                    if (data.type === 'error') reject(new Error(data.message || 'FFmpeg failed.'));
+                    if (data.type === 'error') reject(new Error(data.message || 'Remux failed.'));
                 };
-                worker.onerror = event => reject(new Error(event.message || 'FFmpeg worker failed.'));
+
+                worker.onerror = event => reject(new Error(event.message || 'Remux worker failed.'));
                 worker.postMessage({
                     type: 'mux',
                     video: videoBlob,
