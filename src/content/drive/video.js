@@ -18,6 +18,7 @@
     const STAGE_MESSAGES = new Set([
         'videoFormatsDetected', 'videoStreamDetected',
         'videoStagePreload', 'videoStageStarted', 'videoStageStatus', 'videoStageProgress',
+        'videoStageWarmup',
         'videoStageMergeProgress', 'videoStageDownloadStarted', 'videoStageFinished',
         'videoStageError', 'videoStageCancelled'
     ]);
@@ -766,6 +767,16 @@
                 break;
             case 'videoStageProgress':
                 videoOverlay.update({ label: message.label, received: message.received, total: message.total });
+                break;
+            case 'videoStageWarmup':
+                videoOverlay.update({
+                    warmup: {
+                        remainingSec: message.remainingSec,
+                        totalSec: message.totalSec,
+                        phase: message.phase,
+                        attempt: message.attempt
+                    }
+                });
                 break;
             case 'videoStageMergeProgress':
                 videoOverlay.update({ stage: 'merge', progress: message.progress });

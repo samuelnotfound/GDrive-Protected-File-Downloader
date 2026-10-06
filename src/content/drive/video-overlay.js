@@ -6,6 +6,7 @@
         jobId: null,
         stage: 'download',
         merge: 0,
+        warmupPhase: null,
         qualityLabel: '',
         video: { received: 0, total: 0 },
         audio: { received: 0, total: 0 }
@@ -455,6 +456,7 @@
         state.jobId = jobId || null;
         state.stage = 'download';
         state.merge = 0;
+        state.warmupPhase = null;
         state.qualityLabel = qualityLabel || state.qualityLabel || '';
         state.video.total = Math.max(0, Number(videoTotal) || 0);
         state.audio.total = Math.max(0, Number(audioTotal) || 0);
@@ -476,6 +478,33 @@
         const root = ensure();
         if (!root) return;
 
+        if (msg.warmup != null) {
+            const title = root.querySelector('#psd-video-progress-title');
+            const detail = root.querySelector('#psd-video-progress-detail');
+            if (msg.warmup.phase === 'restarting') {
+                state.warmupPhase = 'restarting';
+                if (title) title.textContent = 'Restarting download';
+                if (detail) detail.textContent = 'Connection was too slow — trying again…';
+            } else if (msg.warmup.phase === 'checking') {
+                state.warmupPhase = 'checking';
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
+                if (detail) detail.textContent = formatSeparateProgress();
+            } else if (msg.warmup.phase === 'done') {
+                state.warmupPhase = null;
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
+                if (detail) detail.textContent = formatSeparateProgress();
+                // Refresh ring with whatever progress we already have.
+                if (state.stage === 'download') {
+                    setRing(downloadOverallPercent() * DOWNLOAD_WEIGHT * 100);
+                }
+            } else if (msg.warmup.remainingSec > 0) {
+                state.warmupPhase = 'warmup';
+                if (title) title.textContent = state.qualityLabel ? `Downloading ${state.qualityLabel}` : 'Downloading Stream';
+                if (detail) detail.textContent = formatSeparateProgress();
+            }
+            return;
+        }
+
         if (msg.label === 'video' || msg.label === 'audio') {
             // Ignore late progress after the job has already finished/cancelled.
             // clearJob() nulls jobId before the terminal stage update, so without
@@ -494,6 +523,8 @@
             const percent = downloadOverallPercent();
             if (state.stage === 'download') setRing(percent * DOWNLOAD_WEIGHT * 100);
 
+            // Always show per-stream byte progress, including during warmup.
+            // The warmup countdown/status text is intentionally hidden.
             const detail = root.querySelector('#psd-video-progress-detail');
             if (detail) detail.textContent = formatSeparateProgress();
             return;
