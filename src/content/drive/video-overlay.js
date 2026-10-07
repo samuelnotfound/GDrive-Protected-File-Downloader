@@ -274,6 +274,10 @@
         </div>
       </div>`;
 
+    /** Tell video.js a job ended right now, so it doesn't sit waiting on a message that may never arrive. */
+    function announceLocalEnd() {
+        try { document.dispatchEvent(new CustomEvent('psd-video-stage-local-end')); } catch (_) {}
+    }
     function createOverlayRoot() {
         const root = document.createElement("div");
         root.id = "psd-video-progress-overlay";
@@ -289,6 +293,7 @@
             cancelButton.disabled = true;
             state.jobId = null;
             setState("cancelled");
+            announceLocalEnd();
             try {
                 chrome.runtime.sendMessage({
                     type: "videoStageCancel",
@@ -308,6 +313,7 @@
             const jobId = state.jobId;
             state.jobId = null;
             root.style.display = "none";
+            announceLocalEnd();
             if (jobId) {
                 try {
                     chrome.runtime.sendMessage({ type: "videoStageCancel", jobId });
@@ -352,6 +358,7 @@
         const jobId = state.jobId;
         state.jobId = null;
         setState('error', 'This was taking too long and was stopped. Please try downloading again.', true);
+        announceLocalEnd();
         try {
             chrome.runtime.sendMessage({ type: 'videoStageCancel', jobId });
         } catch (_) {

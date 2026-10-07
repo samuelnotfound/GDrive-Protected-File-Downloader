@@ -791,8 +791,19 @@
         }
     }
 
-    function finishVideoStage(stage, message) {
-        videoOverlay.clearJob();
+    /**
+     * Drops the "a download is in progress" lock and restores the quality
+     * picker. Split out of finishVideoStage so it can also be called the
+     * instant the user hits Cancel/Close in the overlay, instead of only
+     * after chrome.runtime/chrome.tabs messaging confirms the job ended —
+     * that round trip can be delayed or dropped (service worker asleep,
+     * tab messaging hiccup), which otherwise left video.operation stuck on
+     * 'staging' and silently blocked every later Download click even
+     * though the overlay itself looked idle. Safe to call more than once:
+     * a no-op once operation is already back to 'idle'.
+     */
+    function releaseStagingLock() {
+        if (video.operation !== 'staging') return;
         video.operation = 'idle';
         // Always keep scanned quality labels so the next File → Download can
         // reopen the picker without probing the player again.
@@ -821,6 +832,11 @@
         }
         updateVideoMenuState();
         try { quality.update?.(); } catch (_) {}
+    }
+
+    function finishVideoStage(stage, message) {
+        videoOverlay.clearJob();
+        releaseStagingLock();
         videoOverlay.update({ stage, ...(message ? { message } : {}) });
     }
 
@@ -858,6 +874,7 @@
             if (window.top !== window.self) return;
             handleVideoMessage(message);
         });
+        document.addEventListener('psd-video-stage-local-end', releaseStagingLock);
     }
 
     function init() {
