@@ -19,7 +19,7 @@
         'videoFormatsDetected', 'videoStreamDetected',
         'videoStagePreload', 'videoStageStarted', 'videoStageStatus', 'videoStageProgress',
         'videoStageMergeProgress', 'videoStageDownloadStarted', 'videoStageFinished',
-        'videoStageError', 'videoStageCancelled'
+        'videoStageError', 'videoStageCancelled', 'videoStageRestarted'
     ]);
 
     function normalizeQualityMenuItem(item) {
@@ -784,6 +784,9 @@
                 break;
             case 'videoStageCancelled':
                 finishVideoStage('cancel');
+                break;
+            case 'videoStageRestarted':
+                videoOverlay.markRestarted?.(!!message.reset);
                 break;
         }
     }

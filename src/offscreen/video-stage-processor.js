@@ -88,6 +88,9 @@
 
     async function process(job, videoBlob, audioBlob) {
         downloader.throwIfCancelled(job.jobId);
+        if (!videoBlob?.size || !audioBlob?.size) {
+            throw new Error('Cannot merge: the video or audio stream is empty or incomplete.');
+        }
         const mergedBlob = await mergeStreams(job, videoBlob, audioBlob);
         downloader.throwIfCancelled(job.jobId);
         downloader.postStageMessage('videoStageStatus', { jobId: job.jobId, stage: 'processing' });

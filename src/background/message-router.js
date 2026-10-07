@@ -614,12 +614,16 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
                 video.requestedLabel = label;
             }
 
-            // Resolve shared audio track
-            let audio = await getCurrentSessionAudioCandidate(tabId);
-            if (!audio?.url) {
-                audio = (streamCaptureState(tabId)?.recentStreams || []).find(isAudioStream)
-                    || (typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null);
-            }
+            // Prefer the freshest audio seen around this capture (stale session
+            // audio URLs often return a ~1 KB error body on range download).
+            const recentAudio = (streamCaptureState(tabId)?.recentStreams || [])
+                .filter(s => s?.url && isAudioStream(s))
+                .sort((a, b) => Number(b.capturedAt || 0) - Number(a.capturedAt || 0));
+            const audioAfterClick = recentAudio.find(s => Number(s.capturedAt || 0) >= clickAt - 50) || null;
+            let audio = audioAfterClick
+                || recentAudio[0]
+                || await getCurrentSessionAudioCandidate(tabId)
+                || (typeof getGlobalLastAudio === 'function' ? getGlobalLastAudio() : null);
             if (audio?.url) {
                 audio = {
                     ...audio,
@@ -865,11 +869,35 @@ async function cancelVideoStage(jobId, job, options = {}) {
 }
 
 /**
+ * Restarts a stuck download job without losing progress.
+ *
+ * The job record (stream URLs, sizes) lives in storage, so this works even if
+ * the offscreen document was closed/recreated while the download was stalled.
+ * The offscreen side decides whether to resume the live run or start over.
+ *
+ * @param {string} jobId - Job ID
+ */
+async function restartVideoStage(jobId) {
+    const job = (await getStoredJobs())[jobId];
+    if (!job) return { success: false, error: 'This download is no longer active.' };
+    try {
+        await ensureVideoOffscreen();
+    } catch (error) {
+        return { success: false, error: error?.message || String(error) };
+    }
+    sendOffscreen({ type: 'videoStageRestartInternal', jobId });
+    return { success: true };
+}
+
+/**
  * Relays progress and lifecycle messages from offscreen chunk downloader to tab UI.
  */
 async function handleVideoStageMessage({ request }) {
     const job = (await getStoredJobs())[request.jobId];
     const isCancel = request.type === 'videoStageCancel';
+
+    // Restart comes from the tab's overlay; it is a command, not a status to relay back.
+    if (request.type === 'videoStageRestart') return restartVideoStage(request.jobId);
 
     // Forward progress/status message to originating tab UI
     if (job?.sourceTabId != null && !isCancel) await sendTab(job.sourceTabId, { type: request.type, ...request });

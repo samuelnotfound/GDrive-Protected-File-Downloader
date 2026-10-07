@@ -2,11 +2,18 @@
     const NS = 'GDriveVideoOverlay';
     const CIRCUMFERENCE = 106.81415022205297;
     const DOWNLOAD_WEIGHT = 1;
+    /** No new bytes for this long during download → offer the Restart button. */
+    const STALL_MS = 6000;
+    /** No progress for this long while merging/finalizing → treat the job as dead so a new download isn't blocked forever. */
+    const MERGE_STALL_MS = 20000;
     const state = {
         jobId: null,
         stage: 'download',
         merge: 0,
         qualityLabel: '',
+        lastProgressAt: Date.now(),
+        stalled: false,
+        note: '',
         video: { received: 0, total: 0 },
         audio: { received: 0, total: 0 }
     };
@@ -163,6 +170,29 @@
     opacity: .55;
     cursor: default;
 }
+#psd-video-progress-restart {
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: stretch;
+    display: none;
+    margin-top: 8px;
+    border: 0;
+    box-sizing: border-box;
+    border-radius: 18px;
+    padding: 8px 17px;
+    background: rgba(253,214,99,.14);
+    color: #fdd663;
+    font: 500 13px/16px 'Google Sans', Roboto, sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+}
+#psd-video-progress-restart:hover {
+    background: rgba(253,214,99,.24);
+}
+#psd-video-progress-restart:disabled {
+    opacity: .55;
+    cursor: default;
+}
 #psd-video-progress-close {
     display: none;
     width: 28px;
@@ -238,6 +268,7 @@
               <div id="psd-video-progress-detail"></div>
             </div>
             <button id="psd-video-progress-cancel" type="button">Cancel</button>
+            <button id="psd-video-progress-restart" type="button">Restart</button>
             <button id="psd-video-progress-close" type="button" aria-label="Close">×</button>
           </div>
         </div>
@@ -274,10 +305,80 @@
             }, 700);
         });
         closeButton.addEventListener("click", () => {
+            const jobId = state.jobId;
             state.jobId = null;
             root.style.display = "none";
+            if (jobId) {
+                try {
+                    chrome.runtime.sendMessage({ type: "videoStageCancel", jobId });
+                } catch (_) {
+                    // The page can disappear while we're cleaning up.
+                }
+            }
+        });
+        const restartButton = root.querySelector("#psd-video-progress-restart");
+        restartButton.addEventListener("click", () => {
+            const jobId = state.jobId;
+            if (!jobId || restartButton.disabled) return;
+            // Give the restarted download a fresh grace period before the
+            // button can reappear, and tell the user something is happening.
+            state.lastProgressAt = Date.now();
+            state.note = "Restarting download…";
+            syncRestart();
+            refreshDetail();
+            try {
+                const pending = chrome.runtime.sendMessage({
+                    type: "videoStageRestart",
+                    jobId
+                });
+                pending?.catch?.(() => {});
+            } catch (_) {
+                // The page can disappear while restarting.
+            }
         });
     }
+    /**
+     * Merging/finalizing has no retry UI of its own — if it stalls (e.g. a
+     * worker wedged on a malformed stream) the overlay would otherwise sit
+     * on "Processing: 100%" forever and the stale jobId would keep blocking
+     * every future download attempt. Give up after MERGE_STALL_MS and
+     * release the lock so the user can simply try again.
+     */
+    function checkMergeStall() {
+        if (!state.jobId) return;
+        if (state.stage !== 'merge' && state.stage !== 'processing') return;
+        if (Date.now() - state.lastProgressAt < MERGE_STALL_MS) return;
+
+        const jobId = state.jobId;
+        state.jobId = null;
+        setState('error', 'This was taking too long and was stopped. Please try downloading again.', true);
+        try {
+            chrome.runtime.sendMessage({ type: 'videoStageCancel', jobId });
+        } catch (_) {
+            // The page can disappear while we're cleaning up.
+        }
+    }
+    /** Show the Restart button only while a download has made no progress. */
+    function syncRestart() {
+        const root = document.getElementById("psd-video-progress-overlay");
+        if (!root) return;
+        const button = root.querySelector("#psd-video-progress-restart");
+        if (!button) return;
+        const show = !!state.jobId
+            && state.stage === "download"
+            && root.style.display !== "none"
+            && Date.now() - state.lastProgressAt >= STALL_MS;
+        const changed = show !== state.stalled;
+        state.stalled = show;
+        button.style.display = show ? "inline-flex" : "none";
+        if (changed) refreshDetail();
+    }
+    function refreshDetail() {
+        const root = document.getElementById("psd-video-progress-overlay");
+        const info = root?.querySelector("#psd-video-progress-detail");
+        if (info && state.stage === "download") info.textContent = formatSeparateProgress();
+    }
+    let stallTimer = null;
     function ensure() {
         if (window.top !== window.self) return null;
         let root = document.getElementById("psd-video-progress-overlay");
@@ -286,6 +387,7 @@
         (document.body || document.documentElement).appendChild(root);
         root.style.display = "none";
         bindOverlayEvents(root);
+        if (!stallTimer) stallTimer = setInterval(() => { syncRestart(); checkMergeStall(); }, 1000);
         return root;
     }
     function combinedTotal() {
@@ -307,6 +409,12 @@
         return `${label}: —`;
     }
     function formatSeparateProgress() {
+        const lines = formatStreamLines();
+        if (state.stalled) return (lines ? lines + '\n' : '') + 'No data received. Try Restart.';
+        if (state.note) return (lines ? lines + '\n' : '') + state.note;
+        return lines;
+    }
+    function formatStreamLines() {
         const hasVideo = (state.video.total > 0) || (state.video.received > 0);
         const hasAudio = (state.audio.total > 0) || (state.audio.received > 0);
         // Progressive / single-stream downloads only report under "video".
@@ -354,6 +462,12 @@
         const title = root.querySelector('#psd-video-progress-title');
         const info = root.querySelector('#psd-video-progress-detail');
         const cancel = root.querySelector('#psd-video-progress-cancel');
+        if (stage !== 'download') {
+            const restartBtn = root.querySelector('#psd-video-progress-restart');
+            if (restartBtn) restartBtn.style.display = 'none';
+            state.stalled = false;
+            state.note = '';
+        }
         if (stage === 'download') {
             title.textContent = state.qualityLabel
                 ? `Downloading ${state.qualityLabel}`
@@ -455,6 +569,9 @@
         state.jobId = jobId || null;
         state.stage = 'download';
         state.merge = 0;
+        state.lastProgressAt = Date.now();
+        state.stalled = false;
+        state.note = '';
         state.qualityLabel = qualityLabel || state.qualityLabel || '';
         state.video.total = Math.max(0, Number(videoTotal) || 0);
         state.audio.total = Math.max(0, Number(audioTotal) || 0);
@@ -483,7 +600,20 @@
             if (['ready', 'cancelled', 'error'].includes(state.stage)) return;
 
             const bucket = state[msg.label];
-            bucket.received = Math.max(bucket.received, Number(msg.received) || 0);
+            // Any progress message with a new byte count proves data is flowing
+            // (after a resume the count restarts below the old maximum).
+            const incoming = Number(msg.received) || 0;
+            if (incoming > 0 && incoming !== bucket.lastMsgReceived) {
+                bucket.lastMsgReceived = incoming;
+                state.lastProgressAt = Date.now();
+                state.note = '';
+                if (state.stalled) {
+                    state.stalled = false;
+                    const restartBtn = root.querySelector('#psd-video-progress-restart');
+                    if (restartBtn) restartBtn.style.display = 'none';
+                }
+            }
+            bucket.received = Math.max(bucket.received, incoming);
             const reportedTotal = Math.max(0, Number(msg.total) || 0);
             // Prefer a larger total whenever one arrives (Content-Range often
             // corrects an undersized clen from the original stream URL).
@@ -507,6 +637,7 @@
         }
         if (msg.stage === 'merge') {
             state.merge = Math.max(0, Math.min(1, Number(msg.progress) || 0));
+            state.lastProgressAt = Date.now();
             if (!setState('merge')) return;
             const percent = state.merge * 100;
             const info = root.querySelector('#psd-video-progress-detail');
@@ -515,6 +646,7 @@
             return;
         }
         if (msg.stage === 'processing') {
+            state.lastProgressAt = Date.now();
             setState('processing');
             return;
         }
@@ -540,8 +672,19 @@
             setState('error', msg.message || '', true);
         }
     }
+    /** Offscreen confirmed a restart. reset=true means it began again from byte 0. */
+    function markRestarted(reset = false) {
+        state.lastProgressAt = Date.now();
+        state.note = '';
+        if (reset) {
+            state.video = { received: 0, total: state.video.total, lastMsgReceived: 0 };
+            state.audio = { received: 0, total: state.audio.total, lastMsgReceived: 0 };
+        }
+        syncRestart();
+        refreshDetail();
+    }
     window[NS] = {
-        show, setJob, update, getJobId: () => state.jobId, getStage: () => state.stage, clearJob: () => {
+        show, setJob, update, markRestarted, getJobId: () => state.jobId, getStage: () => state.stage, clearJob: () => {
             state.jobId = null;
             /* keep qualityLabel for display continuity */
         }
