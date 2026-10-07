@@ -854,8 +854,6 @@ const FINISHED_STAGE_TYPES = new Set(['videoStageFinished', 'videoStageError', '
  * @param {boolean} [options.silent=false] - If true, do not send cancellation event to tab
  */
 async function cancelVideoStage(jobId, job, options = {}) {
-    stopStreamWarmups(jobId);
-    clearDownloadMonitor(jobId);
     sendOffscreen({ type: 'videoStageCancelInternal', jobId });
     if (!options.silent && job?.sourceTabId != null) {
         await sendTab(job.sourceTabId, { type: 'videoStageCancelled', jobId });
@@ -873,19 +871,12 @@ async function handleVideoStageMessage({ request }) {
     const job = (await getStoredJobs())[request.jobId];
     const isCancel = request.type === 'videoStageCancel';
 
-    // Record progress bytes for CDN slow-start monitor
-    if (request.type === 'videoStageProgress' && request.jobId) {
-        noteDownloadProgress(request.jobId, request.label, request.received);
-    }
-
     // Forward progress/status message to originating tab UI
     if (job?.sourceTabId != null && !isCancel) await sendTab(job.sourceTabId, { type: request.type, ...request });
     if (isCancel) return cancelVideoStage(request.jobId, job);
 
     // If job finished, errored, or cancelled, clean up resources
     if (FINISHED_STAGE_TYPES.has(request.type)) {
-        stopStreamWarmups(request.jobId);
-        clearDownloadMonitor(request.jobId);
         await queueJobMutation(currentJobs => {
             if (!currentJobs[request.jobId]) return false;
             delete currentJobs[request.jobId];
