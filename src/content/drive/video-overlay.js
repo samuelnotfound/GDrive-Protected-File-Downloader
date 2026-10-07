@@ -435,7 +435,7 @@
             return;
         }
         // Same active job → just keep the overlay visible (don't reset progress).
-        // Different job (e.g. slow-start restart) or finished stage → full reset.
+        // Different job or finished stage → full reset.
         const sameActiveJob =
             jobId &&
             state.jobId === jobId &&

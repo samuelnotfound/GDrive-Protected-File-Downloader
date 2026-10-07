@@ -829,7 +829,7 @@
         if (message.type === 'videoStagePreload') {
             const job = videoOverlay.getJobId();
             const stage = videoOverlay.getStage();
-            // Allow a new jobId to take over (slow-start restart creates a fresh job).
+            // Allow a new jobId to take over.
             // Only ignore preload when it's the same job already past the download stage.
             const sameJobWrongStage = job === message.jobId && stage !== 'download';
             if (sameJobWrongStage) return;
