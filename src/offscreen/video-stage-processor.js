@@ -4,6 +4,9 @@
     const workers = new Map();
     const rejects = new Map();
 
+    /** If the worker goes this long without posting anything at all, treat it as wedged. */
+    const WORKER_IDLE_TIMEOUT_MS = 25000;
+
     function getAudioCodec(url) {
         try {
             const parsedURL = new URL(url);
@@ -29,11 +32,23 @@
         const worker = new Worker(chrome.runtime.getURL('vendor/mp4-remux-worker.js'));
         workers.set(job.jobId, worker);
 
+        let idleTimer = null;
         try {
             return await new Promise((resolve, reject) => {
                 rejects.set(job.jobId, reject);
+                let lastMsgAt = Date.now();
+
+                const armIdleWatchdog = () => {
+                    clearTimeout(idleTimer);
+                    idleTimer = setTimeout(() => {
+                        if (Date.now() - lastMsgAt < WORKER_IDLE_TIMEOUT_MS) return armIdleWatchdog();
+                        reject(new Error('Merging stalled and was stopped. Please try downloading again.'));
+                    }, WORKER_IDLE_TIMEOUT_MS);
+                };
+                armIdleWatchdog();
 
                 worker.onmessage = event => {
+                    lastMsgAt = Date.now();
                     const data = event.data || {};
                     if (data.type === 'status') return;
                     if (data.type === 'ffmpeg-progress') {
@@ -66,6 +81,7 @@
                 });
             });
         } finally {
+            clearTimeout(idleTimer);
             rejects.delete(job.jobId);
             try { worker.terminate(); } catch (_) {}
             if (workers.get(job.jobId) === worker) workers.delete(job.jobId);

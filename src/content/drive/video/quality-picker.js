@@ -107,7 +107,19 @@
             if (target.closest('#psd-video-quality-download')) {
                 setQualityDropdownOpen(root, false);
                 const btn = root.querySelector('#psd-video-quality-download');
-                if (btn?.disabled || video.operation === 'staging' || videoOverlay.getJobId?.()) return;
+                if (btn?.disabled) return;
+                if (video.operation === 'staging' || videoOverlay.getJobId?.()) {
+                    // A real in-progress job always hides this picker, so if the
+                    // button is here and clickable, whatever job we still think
+                    // is "active" already lost its own UI — it's stale. Clear it
+                    // instead of silently eating the click.
+                    const staleJobId = videoOverlay.getJobId?.();
+                    if (staleJobId) {
+                        try { chrome.runtime.sendMessage({ type: 'videoStageCancel', jobId: staleJobId }); } catch (_) {}
+                    }
+                    videoOverlay.clearJob?.();
+                    video.operation = 'idle';
+                }
                 void downloadFromPicker();
                 return;
             }
