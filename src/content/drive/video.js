@@ -43,7 +43,10 @@
             info.style.cssText = 'display:block;box-sizing:border-box;width:100%;max-width:100%;margin-top:2px;font:400 11px/14px Roboto,Arial,sans-serif;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;';
         }
 
-        item.querySelectorAll('.aqdrmf-rymPhb-KkROqb').forEach(host => {
+        // Align the leading icon (SVG host) with the first line of the label.
+        item.querySelectorAll('svg').forEach(svg => {
+            const host = svg.parentElement;
+            if (!host || host === item) return;
             host.style.setProperty('align-self', 'flex-start', 'important');
             host.style.setProperty('margin-top', '3px', 'important');
         });

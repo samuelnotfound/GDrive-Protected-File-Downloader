@@ -120,10 +120,11 @@
             findPrimaryLabel(item);
         if (labelNode) {
             labelNode.textContent = label;
-            // Reference-style: hide everything that is not the label (submenu >, shortcuts, etc.).
+            // Hide non-label chrome (submenu >, shortcuts, etc.), but keep icon slots visible.
             for (const el of item.querySelectorAll('*')) {
                 el.style.pointerEvents = 'none';
                 if (el === labelNode || el.contains(labelNode) || labelNode.contains(el)) continue;
+                if (el.tagName === 'SVG' || el.querySelector?.('svg')) continue;
                 el.style.visibility = 'hidden';
             }
             labelNode.style.visibility = 'visible';
@@ -188,14 +189,27 @@
     }
 
     const DOWNLOAD_ICON = [
-        '<span class="notranslate aqdrmf-rymPhb-Abojl aqdrmf-rymPhb-H09UMb-bN97Pc" aria-hidden="true">',
-        '<svg height="24" viewBox="0 96 960 960" width="24">',
-        '<path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"></path>',
+        '<span aria-hidden="true">',
+        '<svg height="24" viewBox="0 96 960 960" width="24" fill="currentColor">',
+        '<path fill="currentColor" d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"></path>',
         '</svg></span>'
     ].join('');
+
     function setDownloadMenuItemIcon(item) {
-        const host = item.querySelector('.aqdrmf-rymPhb-KkROqb');
-        if (host) host.innerHTML = DOWNLOAD_ICON;
+        if (!item) return;
+        // Prefer an existing SVG slot; otherwise the first child that already holds an icon.
+        const host = item.querySelector('svg')?.parentElement || item.firstElementChild;
+        if (!host) return;
+        host.innerHTML = DOWNLOAD_ICON;
+        host.style.visibility = 'visible';
+        let p = host.parentElement;
+        while (p && p !== item) {
+            p.style.visibility = 'visible';
+            p = p.parentElement;
+        }
+        const label = findPrimaryLabel(item);
+        const color = label ? getComputedStyle(label).color : '';
+        if (color) host.style.color = color;
     }
     function styleDownloadMenuItem(item, opacity = '1') {
         item.style.cursor = 'pointer';
