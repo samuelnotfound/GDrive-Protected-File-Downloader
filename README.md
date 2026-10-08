@@ -61,11 +61,11 @@ This is an experimental program and, like many experimental projects, it may sti
 
 ### References
 
-- **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference for the Google Drive video download flow (separate video/audio streams).
-- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference for the PDF capture workflow.
+- **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)**
+- **[iamarghamallick/How-to-download-protected-view-only-files-from-Google-Drive](https://github.com/iamarghamallick/How-to-download-protected-view-only-files-from-Google-Drive)**
+- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)**
   - **[mhsohan/How-to-download-protected-view-only-files-from-google-drive-](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)**
   - **[zeltox/Google-Drive-PDF-Downloader](https://github.com/zeltox/Google-Drive-PDF-Downloader)**
-
 ### Bundled library
 
 - **[mp4-remux](https://github.com/mscststs/mp4-remux)** — tiny pure-JS tool used to merge separate video and audio MP4 streams without re-encoding.
