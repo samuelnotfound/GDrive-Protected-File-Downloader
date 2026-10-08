@@ -1,24 +1,21 @@
-
 (() => {
     const app = window.__PSD;
     const pdf = app.pdfState;
 
-    const PREFIX = 'blob:https://drive.google.com/';
-    const MIN_W = 500;
-    const MIN_H = 300;
-    const IMAGE_WAIT_FAST = 1200;
-    const IMAGE_WAIT_RECOVERY = 1800;
-    // Wait long enough for Drive's viewer chrome (page input + total) to appear
-    // when the user clicks Download before the document has finished loading.
-    const PAGE_COUNT_WAIT = 12000;
-    const VIEWER_READY_WAIT = 15000;
-    const POLL_INTERVAL = 35;
-    const IMAGE_STABLE_MS = 60;
-    const PAGE_NAV_WAIT = 400;
+    const IMAGE_SELECTOR = 'img[src^="blob:"]';
+    const MIN_WIDTH = 500;
+    const MIN_HEIGHT = 300;
+    const WAIT_FOR_VIEWER = 12000;
+    const WAIT_FOR_IMAGE = 6000;
     const RING_CIRCUMFERENCE = 2 * Math.PI * 17;
 
-    const reportProgress = (status, detail, percent = null) =>
+    pdf.runId ??= 0;
+    pdf.cancelOverlayTimer ??= null;
+
+    const report = (status, detail, percent = null) =>
         app.ui.updateInPageOverlay(status, detail, percent);
+
+    const isCurrentRun = runId => runId === pdf.runId && !pdf.stopRequested;
 
     function resetProgressUI() {
         const root = document.getElementById('psd-inpage-overlay');
@@ -29,7 +26,7 @@
             ring.style.strokeDasharray = String(RING_CIRCUMFERENCE);
             ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
         }
-        root.classList.remove('cancelled', 'completed');
+        root.classList.remove('cancelled', 'completed', 'unsupported');
     }
 
     function showUnsupportedFile() {
@@ -39,469 +36,211 @@
         app.ui.showInPageOverlay(true);
 
         const root = document.getElementById('psd-inpage-overlay');
-        if (root) {
-            root.classList.remove('completed', 'cancelled', 'minimized');
-            root.classList.add('unsupported');
+        if (!root) return;
 
-            const title = root.querySelector('#psd-inpage-title');
-            const detail = root.querySelector('#psd-inpage-detail');
-            const spinner = root.querySelector('#psd-inpage-spinner');
-            const actions = root.querySelector('#psd-inpage-actions');
+        root.classList.add('unsupported');
+        root.querySelector('#psd-inpage-title')?.replaceChildren(
+            document.createTextNode('File type not supported')
+        );
+        root.querySelector('#psd-inpage-detail')?.replaceChildren();
+        root.querySelector('#psd-inpage-spinner')?.style.setProperty('display', 'none');
+        root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
 
-            if (title) title.textContent = 'File type not supported';
-            if (detail) detail.textContent = '';
-            if (spinner) spinner.style.display = 'none';
-            if (actions) actions.style.display = 'none';
-        }
-
-        pdf.unsupportedTimer = setTimeout(() => {
-            const current = document.getElementById('psd-inpage-overlay');
-            if (!current) return;
-            current.classList.remove('unsupported');
-            current.style.display = 'none';
-        }, 2000);
+        pdf.unsupportedTimer = setTimeout(() => app.ui.showInPageOverlay(false), 2000);
     }
 
-    let viewerImageRoot = null;
-    let viewerImageRootAt = 0;
-
-    function getViewerImageRoot() {
-        const now = performance.now();
-        if (viewerImageRoot?.isConnected && now - viewerImageRootAt < 1000) return viewerImageRoot;
-
-        viewerImageRoot = document.querySelector('div[role="dialog"][aria-label="Showing viewer."]') || document;
-        viewerImageRootAt = now;
-        return viewerImageRoot;
+    function getFirstPageImage() {
+        return [...document.querySelectorAll(IMAGE_SELECTOR)].find(img =>
+            img.naturalWidth >= MIN_WIDTH && img.naturalHeight >= MIN_HEIGHT
+        ) || null;
     }
 
-    function allImages() {
-        return [...getViewerImageRoot().querySelectorAll('img')].filter(img => {
-            const src = img.currentSrc || img.src || '';
-            return src.startsWith(PREFIX) && img.naturalWidth >= MIN_W && img.naturalHeight >= MIN_H;
+    function sameClassSet(a, b) {
+        if (a.tagName !== b.tagName || a.classList.length !== b.classList.length) return false;
+        return [...a.classList].every(name => b.classList.contains(name));
+    }
+
+    function getPages() {
+        const image = getFirstPageImage();
+        const page = image?.parentElement;
+        const container = page?.parentElement;
+        if (!page || !container) throw new Error('Could not find PDF pages');
+
+        return [...container.children].filter(candidate => sameClassSet(page, candidate));
+    }
+
+    function getPageImage(page) {
+        return [...page.querySelectorAll(IMAGE_SELECTOR)].find(img =>
+            img.complete && img.naturalWidth >= MIN_WIDTH && img.naturalHeight >= MIN_HEIGHT
+        ) || null;
+    }
+
+    function waitForPageImage(page, runId) {
+        const ready = getPageImage(page);
+        if (ready) return Promise.resolve(ready);
+
+        page.scrollIntoView({ block: 'center' });
+
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const finish = (error, image) => {
+                if (done) return;
+                done = true;
+                observer.disconnect();
+                clearInterval(poll);
+                clearTimeout(timer);
+                error ? reject(error) : resolve(image);
+            };
+
+            const check = () => {
+                if (!isCurrentRun(runId)) {
+                    finish(new Error('Capture cancelled.'));
+                    return;
+                }
+
+                const image = getPageImage(page);
+                if (image) finish(null, image);
+            };
+
+            const observer = new MutationObserver(check);
+            const poll = setInterval(check, 100);
+            const timer = setTimeout(
+                () => finish(new Error('Timed out waiting for page image')),
+                WAIT_FOR_IMAGE
+            );
+
+            observer.observe(page, { childList: true, attributes: true, subtree: true });
+            check();
         });
     }
 
-    function scanRenderedPages(pageNumber = null) {
-        let added = 0;
+    function waitForFirstPage(runId) {
+        const ready = getFirstPageImage();
+        if (ready) return Promise.resolve(ready);
 
-        for (const img of allImages()) {
-            const src = img.currentSrc || img.src || '';
-            if (!pdf.pages.has(src)) {
-                pdf.pages.set(src, {
-                    src,
-                    w: img.naturalWidth,
-                    h: img.naturalHeight,
-                    order: pdf.orderCounter++,
-                    pageNumber
-                });
-                added++;
-                continue;
-            }
+        return new Promise((resolve, reject) => {
+            let done = false;
+            const finish = (error, image) => {
+                if (done) return;
+                done = true;
+                observer.disconnect();
+                clearInterval(poll);
+                clearTimeout(timer);
+                error ? reject(error) : resolve(image);
+            };
 
-            if (pageNumber != null) {
-                const page = pdf.pages.get(src);
-                if (page && page.pageNumber == null) page.pageNumber = pageNumber;
-            }
-        }
+            const check = () => {
+                if (!isCurrentRun(runId)) {
+                    finish(new Error('Capture cancelled.'));
+                    return;
+                }
 
-        return added;
-    }
+                const image = getFirstPageImage();
+                if (image) finish(null, image);
+            };
 
-    function getCurrentPageImage() {
-        const vw = window.innerWidth || document.documentElement.clientWidth || 1;
-        const vh = window.innerHeight || document.documentElement.clientHeight || 1;
-        const cx = vw / 2;
-        const cy = vh / 2;
-        let best = null;
-        let bestScore = -Infinity;
-
-        for (const img of allImages()) {
-            const rect = img.getBoundingClientRect();
-            const visibleW = Math.max(0, Math.min(rect.right, vw) - Math.max(rect.left, 0));
-            const visibleH = Math.max(0, Math.min(rect.bottom, vh) - Math.max(rect.top, 0));
-            if (visibleW < 50 || visibleH < 50) continue;
-
-            const area = visibleW * visibleH;
-            const fullArea = Math.max(1, rect.width * rect.height);
-            const distance = Math.hypot(
-                rect.left + rect.width / 2 - cx,
-                rect.top + rect.height / 2 - cy
+            const observer = new MutationObserver(check);
+            const poll = setInterval(check, 150);
+            const timer = setTimeout(
+                () => finish(new Error('Could not find rendered PDF pages')),
+                WAIT_FOR_VIEWER
             );
-            const score = area * 2 + fullArea - distance * 500;
 
-            if (score > bestScore) {
-                bestScore = score;
-                best = img;
+            observer.observe(document.body, { childList: true, subtree: true });
+            check();
+        });
+    }
+
+    async function imageToJPEG(image, runId) {
+        if (!isCurrentRun(runId)) throw new Error('Capture cancelled.');
+
+        const width = image.naturalWidth;
+        const height = image.naturalHeight;
+        if (!image.complete || width < MIN_WIDTH || height < MIN_HEIGHT) {
+            throw new Error('A PDF page image is not ready.');
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+
+        try {
+            const context = canvas.getContext('2d', { alpha: false });
+            if (!context) throw new Error('Could not create PDF canvas.');
+
+            context.drawImage(image, 0, 0, width, height);
+
+            const blob = await new Promise((resolve, reject) =>
+                canvas.toBlob(value => {
+                    if (value) resolve(value);
+                    else reject(new Error('JPEG encoding failed.'));
+                }, 'image/jpeg', 1.0)
+            );
+
+            if (!isCurrentRun(runId)) throw new Error('Capture cancelled.');
+
+            return {
+                bytes: new Uint8Array(await blob.arrayBuffer()),
+                width,
+                height
+            };
+        } finally {
+            canvas.width = canvas.height = 1;
+        }
+    }
+
+    async function capturePages(pages, runId) {
+        for (let index = 0; index < pages.length; index++) {
+            if (!isCurrentRun(runId)) return false;
+
+            const pageNumber = index + 1;
+            report(
+                'Capturing',
+                `Capturing page ${pageNumber} / ${pages.length}`,
+                (index / pages.length) * 50
+            );
+
+            try {
+                const image = await waitForPageImage(pages[index], runId);
+                const jpeg = await imageToJPEG(image, runId);
+                pdf.capturedPages.set(pageNumber, jpeg);
+            } catch (error) {
+                if (!isCurrentRun(runId)) return false;
+
+                report(
+                    'Capture incomplete',
+                    `Could not capture page ${pageNumber} / ${pages.length}`,
+                    (index / pages.length) * 50
+                );
+                console.warn('[Drive Media Saver] PDF page capture failed:', error);
+                return false;
             }
         }
 
-        return best;
-    }
-
-    async function waitForCurrentPageImage(
-        pageNumber,
-        previousSrc = '',
-        timeout = IMAGE_WAIT_FAST,
-        allowSameSrc = false
-    ) {
-        const deadline = performance.now() + timeout;
-        let stableSrc = '';
-        let stableSince = 0;
-
-        while (!pdf.stopRequested && performance.now() < deadline) {
-            const info = getPageInput();
-
-            if (info?.current === pageNumber) {
-                const img = getCurrentPageImage();
-                const src = img?.currentSrc || img?.src || '';
-                const valid =
-                    img &&
-                    img.complete &&
-                    src.startsWith(PREFIX) &&
-                    img.naturalWidth >= MIN_W &&
-                    img.naturalHeight >= MIN_H &&
-                    (allowSameSrc || src !== previousSrc);
-
-                if (valid) {
-                    if (src !== stableSrc) {
-                        stableSrc = src;
-                        stableSince = performance.now();
-                    } else if (performance.now() - stableSince >= IMAGE_STABLE_MS) {
-                        try {
-                            await img.decode();
-                        } catch (_) {
-                            return null;
-                        }
-
-                        const finalSrc = img.currentSrc || img.src || '';
-                        if (finalSrc === src && Number(getPageInput()?.current) === pageNumber) return img;
-                    }
-                }
-            }
-
-            await app.sleep(POLL_INTERVAL);
-        }
-
-        return null;
-    }
-
-    let pageCountCache = null;
-    let pageCountCacheAt = 0;
-
-    function getPageCountHint() {
-        const now = performance.now();
-        if (now - pageCountCacheAt < 250) return pageCountCache;
-
-        const viewer = document.querySelector('div[role="dialog"][aria-label="Showing viewer."]');
-        const text = viewer?.textContent || document.body?.innerText || '';
-        const match = text.match(/Page\s+\d+\s*(?:\/|of)\s*(\d+)/i);
-
-        pageCountCache = match ? Number(match[1]) : null;
-        pageCountCacheAt = now;
-        return pageCountCache;
-    }
-
-    async function waitForPageInfo(timeout = PAGE_COUNT_WAIT) {
-        const deadline = performance.now() + timeout;
-        let lastMax = null;
-        let stableHits = 0;
-        let firstCheck = true;
-
-        while (!pdf.stopRequested && performance.now() < deadline) {
-            const info = getPageInput(firstCheck);
-            firstCheck = false;
-            const max = Number(info?.max || getPageCountHint() || 0);
-            const current = Number(info?.current || 0);
-
-            // Require a real page control with a known total (not 0 / NaN).
-            if (info?.input && current >= 1 && max >= 1) {
-                if (max === lastMax) {
-                    stableHits += 1;
-                    // Two stable reads so we do not start on a half-initialized max.
-                    if (stableHits >= 2) return { ...info, current, max };
-                } else {
-                    lastMax = max;
-                    stableHits = 1;
-                }
-            } else {
-                lastMax = null;
-                stableHits = 0;
-            }
-
-            await app.sleep(50);
-        }
-
-        return null;
-    }
-
-    /**
-     * Wait until the Drive PDF viewer has both:
-     *  - a confirmed page count (current + max on the page input), and
-     *  - at least one rendered page image ready to capture.
-     * Returns null if the viewer never becomes ready (do not scroll blindly).
-     */
-    async function waitForViewerReady(timeout = VIEWER_READY_WAIT) {
-        const deadline = performance.now() + timeout;
-        let lastReport = 0;
-
-        while (!pdf.stopRequested && performance.now() < deadline) {
-            const now = performance.now();
-            if (now - lastReport > 400) {
-                reportProgress('Preparing…', 'Waiting for pages to load…', 0);
-                lastReport = now;
-            }
-
-            // Prefer a full waitForPageInfo slice so max stabilizes.
-            const remaining = deadline - performance.now();
-            if (remaining <= 0) break;
-
-            const pageInfo = await waitForPageInfo(Math.min(1500, remaining));
-            if (!pageInfo?.max) {
-                await app.sleep(80);
-                continue;
-            }
-
-            // Confirm at least one page image is actually rendered.
-            scanRenderedPages(pageInfo.current);
-            const img = getCurrentPageImage();
-            const src = img?.currentSrc || img?.src || '';
-            const imageReady =
-                img &&
-                img.complete &&
-                src.startsWith(PREFIX) &&
-                img.naturalWidth >= MIN_W &&
-                img.naturalHeight >= MIN_H;
-
-            if (imageReady) {
-                return {
-                    pageInfo,
-                    totalHint: pageInfo.max,
-                    firstImage: img
-                };
-            }
-
-            await app.sleep(80);
-        }
-
-        return null;
-    }
-
-    let pageInputCache = null;
-    let pageInputCacheAt = 0;
-
-    function findPageInput(force = false) {
-        const now = performance.now();
-        if (!force && pageInputCache?.isConnected && now - pageInputCacheAt < 500) {
-            return pageInputCache;
-        }
-
-        const preferred = document.querySelector('input[aria-label*="page" i], input[title*="page" i]');
-        if (preferred && preferred.offsetParent) {
-            pageInputCache = preferred;
-            pageInputCacheAt = now;
-            return preferred;
-        }
-
-        let fallback = null;
-        for (const input of document.querySelectorAll('input')) {
-            if (!input.offsetParent || !/^\d+$/.test(input.value?.trim() || '')) continue;
-
-            const hint = `${input.getAttribute('aria-label') || ''} ${input.getAttribute('title') || ''} ${input.className || ''}`.toLowerCase();
-            if (/page/.test(hint)) {
-                pageInputCache = input;
-                pageInputCacheAt = now;
-                return input;
-            }
-            if (!fallback && input.clientWidth < 120) fallback = input;
-        }
-
-        pageInputCache = fallback;
-        pageInputCacheAt = now;
-        return fallback;
-    }
-
-    function getPageInput(force = false) {
-        const input = findPageInput(force);
-        if (!input) return null;
-        return {
-            input,
-            current: Number(input.value),
-            max: Number(input.max) || getPageCountHint()
-        };
-    }
-
-    const pageInputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-
-    async function goToPage(pageNumber, waitMs = PAGE_NAV_WAIT, options = {}) {
-        // Allow forced navigation (e.g. return to page 1 after cancel) even when stopRequested.
-        if (pdf.stopRequested && !options.force) return false;
-
-        let info = getPageInput();
-        if (!info) info = getPageInput(true);
-        if (!info) return false;
-
-        const input = info.input;
-        const target = String(pageNumber);
-
-        try { input.focus(); } catch (_) {}
-        if (pageInputSetter) pageInputSetter.call(input, target);
-        else input.value = target;
-
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true
-        }));
-        input.dispatchEvent(new KeyboardEvent('keyup', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true
-        }));
-
-        const deadline = performance.now() + waitMs;
-        while (!pdf.stopRequested && performance.now() < deadline) {
-            if (getPageInput()?.current === pageNumber) return true;
-            await app.sleep(POLL_INTERVAL);
-        }
-
-        return getPageInput()?.current === pageNumber;
-    }
-
-    function resetCaptureState() {
-        pdf.pages.clear();
-        pdf.capturedPages.clear();
-        pdf.orderCounter = 0;
-        pageInputCache = null;
-        pageCountCache = null;
-        viewerImageRoot = null;
-    }
-
-    function rememberCapturedPage(pageNumber, image) {
-        const src = image?.currentSrc || image?.src || '';
-        if (!src) return false;
-
-        const page = {
-            src,
-            image,
-            w: image.naturalWidth,
-            h: image.naturalHeight,
-            order: pageNumber - 1,
-            pageNumber
-        };
-
-        pdf.capturedPages.set(pageNumber, page);
-
-        if (!pdf.pages.has(src)) {
-            pdf.pages.set(src, { ...page, order: pdf.orderCounter++ });
-        }
-
+        report('Capturing', `Captured ${pages.length} pages`, 50);
         return true;
     }
 
-    async function capturePage(
-        pageNumber,
-        imageWaitMs,
-        navigateWaitMs = PAGE_NAV_WAIT,
-        allowSameImageIfAlreadyCurrent = false
-    ) {
-        const currentPage = getPageInput()?.current || 0;
-        const previous = getCurrentPageImage();
-        const previousSrc = previous?.currentSrc || previous?.src || '';
-
-        if (!(await goToPage(pageNumber, navigateWaitMs))) return false;
-
-        const allowSameSrc =
-            allowSameImageIfAlreadyCurrent &&
-            currentPage === pageNumber &&
-            previousSrc !== '';
-
-        const image = await waitForCurrentPageImage(
-            pageNumber,
-            previousSrc,
-            imageWaitMs,
-            allowSameSrc
-        );
-        return !!(image && rememberCapturedPage(pageNumber, image));
-    }
-
-    async function capturePagesByNumber(totalHint) {
-        if (!totalHint || pdf.stopRequested) return;
-
-        // Single sequential pass: do not advance until the current page is captured.
-        const MAX_TRIES = 8;
-
-        for (let pageNumber = 1; pageNumber <= totalHint && !pdf.stopRequested; pageNumber++) {
-            let captured = false;
-
-            for (let tryN = 1; tryN <= MAX_TRIES && !captured && !pdf.stopRequested; tryN++) {
-                reportProgress(
-                    'Capturing',
-                    `Capturing page ${pageNumber} / ${totalHint}`,
-                    Math.floor(((pageNumber - 1) / totalHint) * 50)
-                );
-
-                const waitMs = IMAGE_WAIT_FAST + (tryN - 1) * 400;
-                const navMs = PAGE_NAV_WAIT + (tryN - 1) * 100;
-                captured = await capturePage(pageNumber, waitMs, navMs, tryN > 1);
-
-                if (!captured && tryN < MAX_TRIES) {
-                    await app.sleep(150 * tryN);
-                }
-            }
-
-            if (!captured) {
-                reportProgress(
-                    'Capturing',
-                    `Capturing page ${pageNumber} / ${totalHint}`,
-                    Math.floor(((pageNumber - 1) / totalHint) * 50)
-                );
-                await goToPage(pageNumber, PAGE_NAV_WAIT * 2);
-                await app.sleep(300);
-                captured = await capturePage(pageNumber, IMAGE_WAIT_RECOVERY, PAGE_NAV_WAIT * 2, true);
-            }
-
-            if (!captured) {
-                reportProgress(
-                    'Capture incomplete',
-                    `Could not capture page ${pageNumber} / ${totalHint}`,
-                    Math.floor(((pageNumber - 1) / totalHint) * 50)
-                );
-                return;
-            }
-
-            reportProgress(
-                'Capturing',
-                `Capturing page ${pageNumber} / ${totalHint}`,
-                Math.min(50, Math.floor((pageNumber / totalHint) * 50))
-            );
-        }
-    }
-
     function finishCancelledCapture() {
+        clearTimeout(pdf.cancelOverlayTimer);
         app.ui.showScrollDim(false);
         pdf.status = 'cancelled';
         app.ui.updateWindowControl();
-
-        // Return the Drive viewer to page 1 after cancel.
-        void goToPage(1, PAGE_NAV_WAIT, { force: true }).catch?.(() => {});
 
         const root = document.getElementById('psd-inpage-overlay');
         if (!root) return;
 
         root.classList.add('cancelled');
         root.querySelector('#psd-inpage-title').textContent = 'Download cancelled';
-        // Ensure cancel button is hidden on terminal cancel state.
         root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
-        setTimeout(() => app.ui.showInPageOverlay(false), 800);
+        pdf.cancelOverlayTimer = setTimeout(() => {
+            if (pdf.status === 'cancelled') app.ui.showInPageOverlay(false);
+        }, 800);
     }
 
     function beginCapture() {
+        clearTimeout(pdf.cancelOverlayTimer);
+        const runId = ++pdf.runId;
         pdf.status = 'capturing';
         pdf.stopRequested = false;
         resetCaptureState();
@@ -514,61 +253,16 @@
             root.querySelector('#psd-inpage-toggle')?.style.setProperty('display', 'block');
             root.querySelector('#psd-inpage-spinner')?.style.setProperty('display', 'block');
             root.querySelector('#psd-inpage-check')?.style.setProperty('display', 'none');
-            const toggle = root.querySelector('#psd-inpage-toggle');
-            if (toggle) {
-                toggle.disabled = false;
-                toggle.textContent = 'Cancel';
-            }
         }
+
         app.ui.updateWindowControl();
         app.ui.showScrollDim(true);
-        reportProgress('Preparing…', 'Reading page count…', 0);
+        report('Preparing…', 'Waiting for pages to load…', 0);
+        return runId;
     }
 
-    async function captureDocumentPages(pageInfo, totalHint) {
-        // Only capture by page number once the viewer reported a real total.
-        // Blind scrolling without a page count is what ran when Download was
-        // clicked before pages finished loading — that path is no longer used.
-        if (!pageInfo || !totalHint || totalHint < 1) {
-            reportProgress(
-                'Viewer not ready',
-                'Page count is not available yet. Wait for the document to load, then try again.',
-                0
-            );
-            return false;
-        }
-
-        await capturePagesByNumber(totalHint);
-
-        if (pdf.stopRequested) {
-            finishCancelledCapture();
-            return false;
-        }
-        return true;
-    }
-
-    async function finishCapture(totalHint) {
-        app.ui.showScrollDim(false);
-
-        const capturedCount = totalHint ? pdf.capturedPages.size : pdf.pages.size;
-        const total = totalHint || capturedCount;
-        const ready = capturedCount > 0 && (!totalHint || capturedCount >= totalHint);
-
-        pdf.status = ready ? 'ready' : 'idle';
-        app.ui.updateWindowControl();
-
-        const detail = ready
-            ? `${capturedCount} / ${total} page images captured`
-            : `${capturedCount} / ${total || '?'} page images captured. Try Start again.`;
-        const percent = ready ? 50 : Math.min(49, Math.floor(capturedCount / Math.max(1, total) * 50));
-
-        reportProgress(
-            ready ? 'Ready to process PDF' : 'Some pages were not captured',
-            detail,
-            percent
-        );
-
-        if (ready && !pdf.stopRequested) await app.pdfWriter.generate();
+    function resetCaptureState() {
+        pdf.capturedPages.clear();
     }
 
     async function prepare() {
@@ -578,49 +272,44 @@
             return;
         }
 
-        beginCapture();
-        reportProgress('Preparing…', 'Waiting for pages to load…', 0);
+        const runId = beginCapture();
 
-        // Do not scroll or capture until Drive exposes a stable page total
-        // and at least one page image is rendered.
-        const ready = await waitForViewerReady();
-        if (pdf.stopRequested) {
-            finishCancelledCapture();
-            return;
-        }
+        try {
+            await waitForFirstPage(runId);
+            if (!isCurrentRun(runId)) return;
 
-        if (!ready?.pageInfo || !ready?.totalHint) {
-            pdf.status = 'idle';
+            const pages = getPages();
+            if (!pages.length) throw new Error('Could not find PDF pages');
+
+            report('Preparing…', `Found ${pages.length} page${pages.length === 1 ? '' : 's'}`, 0);
+            const captured = await capturePages(pages, runId);
+
+            if (!isCurrentRun(runId)) return;
+            if (!captured || pdf.capturedPages.size !== pages.length) return;
+
             app.ui.showScrollDim(false);
+            pdf.status = 'ready';
             app.ui.updateWindowControl();
-            reportProgress(
-                'Viewer not ready',
-                'Could not read the number of pages. Wait until the document finishes loading, then try Download again.',
-                0
-            );
-            const root = document.getElementById('psd-inpage-overlay');
-            if (root) {
-                root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
-                setTimeout(() => app.ui.showInPageOverlay(false), 2500);
-            }
-            return;
+            await app.pdfWriter.generate(runId);
+        } catch (error) {
+            if (!isCurrentRun(runId)) return;
+
+            app.ui.showScrollDim(false);
+            pdf.status = 'idle';
+            app.ui.updateWindowControl();
+            report('Capture incomplete', error.message || 'Could not capture the PDF.', 0);
+            console.warn('[Drive Media Saver] PDF capture failed:', error);
         }
-
-        const { pageInfo, totalHint } = ready;
-        reportProgress('Preparing…', `Found ${totalHint} page${totalHint === 1 ? '' : 's'}`, 0);
-
-        if (await captureDocumentPages(pageInfo, totalHint)) await finishCapture(totalHint);
     }
 
     app.pdfCapture = {
         prepare,
         resetProgressUI,
         resetCaptureState,
-        rememberCapturedPage,
+        finishCancelledCapture,
         getOrderedCapturedPages: () =>
-            [...(pdf.capturedPages.size ? pdf.capturedPages : pdf.pages).values()].sort((a, b) =>
-                (a.pageNumber ?? a.order) - (b.pageNumber ?? b.order)
-            ),
-        finishCancelledCapture
+            [...pdf.capturedPages.entries()]
+                .sort(([a], [b]) => a - b)
+                .map(([, page]) => page)
     };
 })();

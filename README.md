@@ -3,7 +3,7 @@
 **This does not remove permissions or bypass account restrictions.**
 
 > [!WARNING]
-> **Legal Disclaimer:** This tool is provided strictly for educational purposes and personal use. Users are entirely responsible for ensuring they have the legal right to download any content and must comply with Google Drive's Terms of Service. The creator of this repository assumes no liability for how this tool is used, nor any consequences resulting from its use.
+> **Legal Disclaimer:** This tool is provided strictly for educational purposes and personal use. Users are entirely responsible for ensuring they have the legal right to save or download any content and must comply with Google Drive's Terms of Service. The creator of this repository assumes no liability for how this tool is used, nor any consequences resulting from its use.
 
 ## Features
 
@@ -62,7 +62,7 @@ This is an experimental program and, like many experimental projects, it may sti
 ### References
 
 - **[salauddinn/gdrive-video-downloader](https://github.com/salauddinn/gdrive-video-downloader)** — reference for the Google Drive video download flow (separate video/audio streams).
-- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference for the view-only PDF capture workflow.
+- **[zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader](https://github.com/zavierferodova/Google-Drive-View-Only-PDF-Script-Downloader)** — reference for the PDF capture workflow.
   - **[mhsohan/How-to-download-protected-view-only-files-from-google-drive-](https://github.com/mhsohan/How-to-download-protected-view-only-files-from-google-drive-)**
   - **[zeltox/Google-Drive-PDF-Downloader](https://github.com/zeltox/Google-Drive-PDF-Downloader)**
 

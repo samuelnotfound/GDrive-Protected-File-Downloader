@@ -6,9 +6,7 @@
     const pdf = app.pdfState = app.pdfState || {
         status: 'idle',
         stopRequested: false,
-        pages: new Map(),
         capturedPages: new Map(),
-        orderCounter: 0,
         unsupportedTimer: null
     };
     app.videoState = app.videoState || {

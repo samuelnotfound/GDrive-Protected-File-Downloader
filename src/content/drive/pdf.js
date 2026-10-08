@@ -90,6 +90,8 @@
     function cancel() {
         if (pdf.status !== 'capturing' && pdf.status !== 'processing') return;
         pdf.stopRequested = true;
+        pdf.runId = (pdf.runId || 0) + 1;
+        app.pdfCapture.finishCancelledCapture();
     }
 
     app.pdf = {
