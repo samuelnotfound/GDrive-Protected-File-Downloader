@@ -174,7 +174,7 @@
                 canvas.toBlob(value => {
                     if (value) resolve(value);
                     else reject(new Error('JPEG encoding failed.'));
-                }, 'image/jpeg', 1.0)
+                }, 'image/jpeg', 0.92)
             );
 
             if (!isCurrentRun(runId)) throw new Error('Capture cancelled.');
