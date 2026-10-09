@@ -1,0 +1,72 @@
+name: Build CRX and Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'   # Triggers when you push a tag like v1.9.8
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # Needed to create releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install crx packer
+        run: npm install -g crx
+
+      - name: Get version from manifest
+        id: version
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Create private key file from secret
+        run: |
+          echo "${{ secrets.CRX_PRIVATE_KEY }}" > key.pem
+          # Basic validation
+          if [ ! -s key.pem ]; then
+            echo "Error: CRX_PRIVATE_KEY secret is empty"
+            exit 1
+          fi
+
+      - name: Pack the extension
+        run: |
+          crx pack . -o GDrive-Protected-File-Downloader.crx -p key.pem
+          ls -la *.crx
+
+      - name: Generate updates.xml
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cat > updates.xml << EOF
+          <?xml version='1.0' encoding='UTF-8'?>
+          <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+            <app appid='ihppgmgihaejljlpejdhjnddljonnaki'>
+              <updatecheck 
+                codebase='https://github.com/${{ github.repository }}/releases/download/v${VERSION}/GDrive-Protected-File-Downloader.crx' 
+                version='${VERSION}' />
+            </app>
+          </gupdate>
+          EOF
+          cat updates.xml
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            GDrive-Protected-File-Downloader.crx
+            updates.xml
+          generate_release_notes: true
+          name: "v${{ steps.version.outputs.version }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
