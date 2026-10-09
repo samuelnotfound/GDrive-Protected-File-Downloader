@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "version": "1.9.7",
+  "version": "1.9.8",
   "name": "GDrive Protected File Downloader",
   "description": "Download view-only / protected Google Drive PDFs and videos.",
+  "update_url": "https://raw.githubusercontent.com/samuelnotfound/GDrive-Protected-File-Downloader/main/updates.xml",
   "permissions": [
     "tabs",
     "scripting",
@@ -11,14 +12,10 @@
     "offscreen",
     "webNavigation"
   ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
+      "matches": ["<all_urls>"],
       "js": [
         "src/content/shared/utils.js",
         "src/content/automation/quality-trigger.js"
@@ -30,12 +27,8 @@
       "match_about_blank": true
     },
     {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "src/content/media/network-bridge.js"
-      ],
+      "matches": ["<all_urls>"],
+      "js": ["src/content/media/network-bridge.js"],
       "run_at": "document_start",
       "all_frames": true,
       "match_origin_as_fallback": true,
@@ -75,13 +68,8 @@
   },
   "web_accessible_resources": [
     {
-      "resources": [
-        "vendor/mp4-remux-worker.js",
-        "vendor/mp4-remux.iife.js"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
+      "resources": ["vendor/mp4-remux-worker.js", "vendor/mp4-remux.iife.js"],
+      "matches": ["<all_urls>"]
     }
   ],
   "action": {

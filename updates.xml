@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+  <app appid='ihppgmgihaejljlpejdhjnddljonnaki'>
+    <updatecheck 
+      codebase='https://github.com/samuelnotfound/GDrive-Protected-File-Downloader/releases/download/v1.9.7/GDrive-Protected-File-Downloader.crx' 
+      version='1.9.8' />
+  </app>
+</gupdate>
