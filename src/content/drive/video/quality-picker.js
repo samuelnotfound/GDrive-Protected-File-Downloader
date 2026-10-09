@@ -698,9 +698,9 @@
         download.disabled = !valid || downloadBusy;
 
         if (status) {
-            if (downloadBusy) status.textContent = 'Download in progress…';
-            else if (!hasLabels) status.textContent = 'Play the video first, then open Download again.';
-            else if (!hasSelection) status.textContent = 'Select a quality to download.';
+            if (downloadBusy) status.textContent = 'Export in progress…';
+            else if (!hasLabels) status.textContent = 'Play the video first, then open Export again.';
+            else if (!hasSelection) status.textContent = 'Select a quality to export.';
             else status.textContent = '';
         }
         return valid;
@@ -968,7 +968,7 @@
             const button = root?.querySelector('#psd-video-quality-download');
             const status = root?.querySelector('#psd-video-quality-status');
             if (button) button.disabled = true;
-            if (status) status.textContent = 'Download in progress…';
+            if (status) status.textContent = 'Export in progress…';
             return;
         }
 

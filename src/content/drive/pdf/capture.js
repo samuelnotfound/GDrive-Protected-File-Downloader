@@ -231,7 +231,7 @@
         if (!root) return;
 
         root.classList.add('cancelled');
-        root.querySelector('#psd-inpage-title').textContent = 'Download cancelled';
+        root.querySelector('#psd-inpage-title').textContent = 'Export cancelled';
         root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
         pdf.cancelOverlayTimer = setTimeout(() => {
             if (pdf.status === 'cancelled') app.ui.showInPageOverlay(false);

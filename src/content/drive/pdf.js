@@ -36,7 +36,7 @@
 
         const root = document.getElementById('psd-inpage-overlay');
         root?.classList.remove('quiet', 'idle', 'completed', 'cancelled');
-        root?.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Preparing download'));
+        root?.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Preparing export'));
         root?.querySelector('#psd-inpage-detail')?.replaceChildren(document.createTextNode(''));
 
         void start();
@@ -64,7 +64,7 @@
 
         if (!templateRow) return;
 
-        const item = app.ui.makeStandaloneMenuRow(templateRow, MENU_ID, 'Download');
+        const item = app.ui.makeStandaloneMenuRow(templateRow, MENU_ID, 'Export');
         if (!item) return;
 
         app.ui.setDownloadMenuItemIcon(item);
@@ -73,7 +73,7 @@
             item,
             'psd-pdf-menu-label',
             'psd-pdf-menu-info',
-            'GDrive Protected File Downloader'
+            'Drive Preview Exporter'
         );
         item.addEventListener('click', activateProtectedPDFDownload);
         app.ui.handleMenuKeyboardActivation(item, activateProtectedPDFDownload);

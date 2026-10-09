@@ -31,7 +31,7 @@
             .forEach(element => element.remove());
 
         if (label) {
-            label.textContent = video.operation === 'picker' ? 'Choose video quality' : 'Download';
+            label.textContent = video.operation === 'picker' ? 'Choose video quality' : 'Export';
             label.classList.add('psd-video-menu-label');
             label.style.removeProperty('font-size');
             label.style.removeProperty('line-height');
@@ -39,7 +39,7 @@
         }
 
         if (info) {
-            info.textContent = 'GDrive Protected File Downloader';
+            info.textContent = 'Drive Preview Exporter';
             info.style.cssText = 'display:block;box-sizing:border-box;width:100%;max-width:100%;margin-top:2px;font:400 11px/14px Roboto,Arial,sans-serif;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;';
         }
 
@@ -61,16 +61,16 @@
             || video.operation === 'scanning'
             || (video.operation === 'idle' && !ready);
 
-        let labelText = 'Download';
-        let infoText = 'GDrive Protected File Downloader';
+        let labelText = 'Export';
+        let infoText = 'Drive Preview Exporter';
         if (downloadBusy) {
-            labelText = 'Downloading…';
+            labelText = 'Exporting…';
         } else if (video.operation === 'picker') {
             labelText = 'Choose video quality';
         } else if (video.operation === 'scanning') {
             labelText = 'Reading qualities…';
         } else if (!ready) {
-            labelText = 'Download';
+            labelText = 'Export';
             infoText = 'Play a video first to enable download.';
         }
 
@@ -118,10 +118,10 @@
         const label = app.ui.findPrimaryLabel(item);
         if (label) {
             label.classList.add('psd-video-menu-label');
-            label.textContent = 'Download';
+            label.textContent = 'Export';
             label.style.visibility = 'visible';
         }
-        app.ui.addMenuDescription(item, 'psd-video-menu-label', 'psd-video-menu-info', 'GDrive Protected File Downloader');
+        app.ui.addMenuDescription(item, 'psd-video-menu-label', 'psd-video-menu-info', 'Drive Preview Exporter');
         app.ui.setDownloadMenuItemIcon(item);
         // Icon host was hidden with Share's non-label chrome — show it again.
         item.querySelectorAll('svg, img, [aria-hidden="true"]').forEach(el => {
@@ -205,7 +205,7 @@
         if (!templateRow) return false;
 
         // 1) Label row — inert clone of Share (reference: makeLabelRow).
-        const item = app.ui.makeStandaloneMenuRow(templateRow, VIDEO_MENU_ID, 'Download');
+        const item = app.ui.makeStandaloneMenuRow(templateRow, VIDEO_MENU_ID, 'Export');
         if (!item) return false;
         item.setAttribute('data-psd', '');
         item.setAttribute('data-psd-menu', 'download');
@@ -307,7 +307,7 @@
             fileId: video.fileId,
             at: Date.now(),
             heightCount: options.length,
-            note: note || `Found ${options.length} quality option(s). Select one, then Download.`,
+            note: note || `Found ${options.length} quality option(s). Select one, then Export.`,
             menuOptions: options.slice()
         };
         return formats;
@@ -337,11 +337,11 @@
             if (fromApi.length) {
                 const formats = applyQualityOptions(
                     fromApi,
-                    `Found ${fromApi.length} quality option(s) from player. Select one, then Download.`
+                    `Found ${fromApi.length} quality option(s) from player. Select one, then Export.`
                 );
                 await quality.show(
                     formats,
-                    `Found ${fromApi.length} quality option(s). Select one, then Download.`,
+                    `Found ${fromApi.length} quality option(s). Select one, then Export.`,
                     fromApi
                 );
                 return;
@@ -357,11 +357,11 @@
             if (response?.success && options.length) {
                 const formats = applyQualityOptions(
                     options,
-                    `Found ${options.length} quality option(s). Select one, then Download.`
+                    `Found ${options.length} quality option(s). Select one, then Export.`
                 );
                 await quality.show(
                     formats,
-                    `Found ${options.length} quality option(s). Select one, then Download.`,
+                    `Found ${options.length} quality option(s). Select one, then Export.`,
                     options
                 );
                 return;
@@ -424,7 +424,7 @@
             };
             await quality.show(
                 formats,
-                video.scanCache?.note || `Found ${menuOpts.length} quality option(s). Select one, then Download.`,
+                video.scanCache?.note || `Found ${menuOpts.length} quality option(s). Select one, then Export.`,
                 menuOpts
             );
             return;
@@ -805,7 +805,7 @@
     function releaseStagingLock() {
         if (video.operation !== 'staging') return;
         video.operation = 'idle';
-        // Always keep scanned quality labels so the next File → Download can
+        // Always keep scanned quality labels so the next File → Export can
         // reopen the picker without probing the player again.
         const menuOpts = Array.isArray(video.qualityMenuOptions) ? video.qualityMenuOptions : [];
         if (menuOpts.length) {

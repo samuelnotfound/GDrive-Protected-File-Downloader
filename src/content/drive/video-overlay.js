@@ -264,7 +264,7 @@
               </svg>
             </div>
             <div id="psd-video-progress-title-wrap">
-              <div id="psd-video-progress-title">Downloading Stream</div>
+              <div id="psd-video-progress-title">Exporting stream</div>
               <div id="psd-video-progress-detail"></div>
             </div>
             <button id="psd-video-progress-cancel" type="button">Cancel</button>
@@ -329,7 +329,7 @@
             // Give the restarted download a fresh grace period before the
             // button can reappear, and tell the user something is happening.
             state.lastProgressAt = Date.now();
-            state.note = "Restarting download…";
+            state.note = "Restarting export…";
             syncRestart();
             refreshDetail();
             try {
@@ -357,7 +357,7 @@
 
         const jobId = state.jobId;
         state.jobId = null;
-        setState('error', 'This was taking too long and was stopped. Please try downloading again.', true);
+        setState('error', 'This was taking too long and was stopped. Please try exporting again.', true);
         announceLocalEnd();
         try {
             chrome.runtime.sendMessage({ type: 'videoStageCancel', jobId });
@@ -478,7 +478,7 @@
         if (stage === 'download') {
             title.textContent = state.qualityLabel
                 ? `Downloading ${state.qualityLabel}`
-                : 'Downloading Stream';
+                : 'Exporting stream';
             info.textContent = formatSeparateProgress();
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
@@ -498,14 +498,14 @@
             cancel.disabled = false;
             setRing(percent);
         }else if (stage === 'processing') {
-            title.textContent = 'Finalizing download';
+            title.textContent = 'Finalizing export';
             info.textContent = 'Please wait..';
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
             root.classList.add('processing');
             setRing(0);
         }else if (stage === 'started') {
-            title.textContent = 'Download has started';
+            title.textContent = 'Export has started';
             info.textContent = '';
             cancel.style.display = 'none';
             // Chrome now owns the final file download. There is no reliable
@@ -514,20 +514,20 @@
             // progress segment.
             setRing(0);
         }else if (stage === 'ready') {
-            title.textContent = 'Video downloaded';
+            title.textContent = 'Video exported';
             info.textContent = '';
             cancel.style.display = 'none';
             root.classList.add('completed');
             setRing(100);
         }else if (stage === 'cancel' || stage === 'cancelled') {
-            title.textContent = 'Download Cancelled';
+            title.textContent = 'Export Cancelled';
             info.textContent = '';
             cancel.style.display = 'none';
             root.classList.add('cancelled');
             stage = 'cancelled';
         }else if (stage === 'error') {
-            title.textContent = 'Video download failed';
-            info.textContent = detail || 'The video could not be downloaded.';
+            title.textContent = 'Video export failed';
+            info.textContent = detail || 'The video could not be exported.';
             cancel.style.display = 'none';
             root.classList.add('error');
         }
@@ -567,7 +567,7 @@
                 state.qualityLabel = qualityLabel;
                 const title = root.querySelector('#psd-video-progress-title');
                 if (title && state.stage === 'download') {
-                    title.textContent = `Downloading ${qualityLabel}`;
+                    title.textContent = `Exporting ${qualityLabel}`;
                 }
             }
             return;
@@ -603,7 +603,7 @@
         if (msg.label === 'video' || msg.label === 'audio') {
             // Ignore late progress after the job has already finished/cancelled.
             // clearJob() nulls jobId before the terminal stage update, so without
-            // this guard the overlay keeps rewriting numbers after "Video downloaded".
+            // this guard the overlay keeps rewriting numbers after "Video exported".
             if (['ready', 'cancelled', 'error'].includes(state.stage)) return;
 
             const bucket = state[msg.label];

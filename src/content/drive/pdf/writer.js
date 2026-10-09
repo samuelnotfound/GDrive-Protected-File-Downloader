@@ -106,7 +106,7 @@
         root.querySelector('#psd-inpage-spinner')?.style.setProperty('display', 'none');
         root.querySelector('#psd-inpage-check')?.style.setProperty('display', 'block');
         root.querySelector('#psd-inpage-actions')?.style.setProperty('display', 'none');
-        root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('File downloaded'));
+        root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('File exported'));
         root.querySelector('#psd-inpage-detail')?.replaceChildren();
     }
 
@@ -155,7 +155,7 @@
             pdf.status = 'completed';
             app.pdfCapture.resetCaptureState();
             app.ui.updateWindowControl();
-            report('File downloaded', '', 100);
+            report('File exported', '', 100);
             showCompletedOverlay();
         } catch (error) {
             if (runId !== pdf.runId || pdf.stopRequested) return;

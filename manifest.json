@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "version": "1.9.8",
-  "name": "GDrive Protected File Downloader",
-  "description": "Download view-only / protected Google Drive PDFs and videos.",
+  "name": "Drive Preview Exporter",
+  "description": "Export view-only / protected Google Drive PDF and video previews.",
   "update_url": "https://raw.githubusercontent.com/samuelnotfound/GDrive-Protected-File-Downloader/main/updates.xml",
   "permissions": [
     "tabs",
@@ -73,6 +73,6 @@
     }
   ],
   "action": {
-    "default_title": "GDrive Protected File Downloader"
+    "default_title": "Drive Preview Exporter"
   }
 }

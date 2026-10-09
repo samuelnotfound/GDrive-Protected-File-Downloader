@@ -585,7 +585,7 @@ async function handleCaptureQualityForDownload({ request, tabId }) {
             if (!video?.url) {
                 return {
                     success: false,
-                    error: `${label || height + 'p'} is selected but no video stream URL is available. Seek the video a bit, then try Download again.`
+                    error: `${label || height + 'p'} is selected but no video stream URL is available. Seek the video a bit, then try Export again.`
                 };
             }
 

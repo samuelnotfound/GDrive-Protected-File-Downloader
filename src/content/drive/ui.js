@@ -275,7 +275,7 @@
       <div id="psd-inpage-card"><div id="psd-inpage-body"><div id="psd-inpage-head">
         <div id="psd-inpage-spinner" aria-hidden="true"><svg viewBox="0 0 40 40"><circle class="psd-ring-bg" cx="20" cy="20" r="17"></circle><circle id="psd-inpage-ring" class="psd-ring" cx="20" cy="20" r="17"></circle></svg></div>
         <div id="psd-inpage-check" aria-hidden="true"><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="17"></circle><path d="M11.5 20.5 17 26l11.5-12"></path></svg></div>
-        <div><div id="psd-inpage-title">Preparing download</div><div id="psd-inpage-detail"></div></div>
+        <div><div id="psd-inpage-title">Preparing export</div><div id="psd-inpage-detail"></div></div>
         <div id="psd-inpage-actions"><button id="psd-inpage-toggle" type="button">Cancel</button></div><button id="psd-inpage-close" aria-label="Close">×</button>
       </div></div></div>`;
 
@@ -291,7 +291,7 @@
         const closeButton = root.querySelector('#psd-inpage-close');
         cancelButton.onclick = () => {
             if (!isPDFBusy()) return;
-            root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Cancelling download'));
+            root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Cancelling export'));
             app.pdf?.cancel?.();
         };
         closeButton.onclick = () => {
@@ -301,7 +301,7 @@
             }
             if (pdf.stopRequested) return;
             root.classList.remove('completed', 'unsupported', 'cancelled');
-            root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Cancelling download'));
+            root.querySelector('#psd-inpage-title')?.replaceChildren(document.createTextNode('Cancelling export'));
             app.pdf?.cancel?.();
             const detail = root.querySelector('#psd-inpage-detail');
             if (detail) detail.textContent = '';
@@ -316,7 +316,7 @@
             dim.setAttribute('aria-hidden', 'true');
             dim.style.cssText = 'position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,.80);pointer-events:auto;display:none;';
             dim.innerHTML = '<div id="psd-scroll-dim-msg" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:min(420px,calc(100vw - 48px));text-align:center;pointer-events:none;user-select:none;">' +
-                '<div style="font:500 17px/1.35 \'Google Sans\',Roboto,Arial,sans-serif;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.7);margin-bottom:8px;">Stay on this tab until the download finishes</div>' +
+                '<div style="font:500 17px/1.35 \'Google Sans\',Roboto,Arial,sans-serif;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.7);margin-bottom:8px;">Stay on this tab until the export finishes</div>' +
                 '<div style="font:400 13px/1.4 Roboto,Arial,sans-serif;color:rgba(255,255,255,.72);text-shadow:0 1px 3px rgba(0,0,0,.6);">Leaving this tab may interrupt page capture</div></div>';
             host.appendChild(dim);
         }
@@ -336,7 +336,7 @@
         if (!dim) return;
         if (show && !dim.querySelector('#psd-scroll-dim-msg')) {
             dim.innerHTML = '<div id="psd-scroll-dim-msg" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:min(420px,calc(100vw - 48px));text-align:center;pointer-events:none;user-select:none;">' +
-                '<div style="font:500 17px/1.35 \'Google Sans\',Roboto,Arial,sans-serif;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.7);margin-bottom:8px;">Stay on this tab until the download finishes</div>' +
+                '<div style="font:500 17px/1.35 \'Google Sans\',Roboto,Arial,sans-serif;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.7);margin-bottom:8px;">Stay on this tab until the export finishes</div>' +
                 '<div style="font:400 13px/1.4 Roboto,Arial,sans-serif;color:rgba(255,255,255,.72);text-shadow:0 1px 3px rgba(0,0,0,.6);">Leaving this tab may interrupt page capture</div></div>';
         }
         dim.style.display = show ? 'block' : 'none';
@@ -368,11 +368,11 @@
         const detailEl = root.querySelector('#psd-inpage-detail');
         if (title && !root.classList.contains('cancelled')) {
             const label = String(status || '');
-            if (/^File downloaded$/i.test(label)) title.textContent = 'File downloaded';
+            if (/^File exported$/i.test(label)) title.textContent = 'File exported';
             else if (/^PDF conversion failed$/i.test(label)) title.textContent = 'PDF conversion failed';
             else if (/^PDF incomplete$/i.test(label)) title.textContent = 'PDF incomplete';
             else if (/^Some pages were not captured$/i.test(label)) title.textContent = 'Capture incomplete';
-            else title.textContent = 'Preparing download';
+            else title.textContent = 'Preparing export';
         }
         if (detailEl && !root.classList.contains('cancelled')) {
             const text = String(detail || '');
@@ -396,7 +396,7 @@
     function scanDriveMenus() {
         const menus = getVisibleFileMenus();
         void app.video?.scanViewerState().catch(error => {
-            console.warn('[GDrive Downloader] viewer state scan failed:', error);
+            console.warn('[Drive Preview Exporter] viewer state scan failed:', error);
         });
         for (const menu of menus) {
             app.video?.scanMenu(menu);
