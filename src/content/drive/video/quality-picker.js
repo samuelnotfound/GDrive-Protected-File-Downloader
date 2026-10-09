@@ -274,7 +274,7 @@
                     <input type="hidden" id="psd-video-quality-video" value="" />
                 </div>
                 <div id="psd-video-quality-actions">
-                    <button id="psd-video-quality-download" type="button">Download</button>
+                    <button id="psd-video-quality-download" type="button">Export</button>
                 </div>
             </div>
             <div id="psd-video-quality-status"></div>
@@ -699,7 +699,7 @@
 
         if (status) {
             if (downloadBusy) status.textContent = 'Export in progress…';
-            else if (!hasLabels) status.textContent = 'Play the video first, then open Export again.';
+            else if (!hasLabels) status.textContent = 'Play video first';
             else if (!hasSelection) status.textContent = 'Select a quality to export.';
             else status.textContent = '';
         }
@@ -985,7 +985,7 @@
             || (height ? `${height}p` : '')
         ).trim();
 
-        const veilMsg = `Preparing ${label || (height ? height + 'p' : 'download')}…`;
+        const veilMsg = `Preparing ${label || (height ? height + 'p' : 'export')}…`;
         status.textContent = veilMsg;
         app.ui.closeDriveFileMenu();
 
@@ -1021,7 +1021,7 @@
             filename = `${cleaned} (${pickHeight}p).mp4`;
         }
 
-        status.textContent = 'Starting download…';
+        status.textContent = 'Starting export…';
         const response = await core.sendDownload({
             ...request,
             qualityHeight: pickHeight,
@@ -1035,7 +1035,7 @@
 
         if (!response?.success) {
             button.disabled = false;
-            status.textContent = response?.error || 'Could not start the download.';
+            status.textContent = response?.error || 'Could not start the export.';
             video.operation = 'picker';
             app.video?.updateMenuState();
             return;

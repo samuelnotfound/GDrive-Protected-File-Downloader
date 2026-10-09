@@ -264,7 +264,7 @@
               </svg>
             </div>
             <div id="psd-video-progress-title-wrap">
-              <div id="psd-video-progress-title">Exporting stream</div>
+              <div id="psd-video-progress-title">Preparing stream</div>
               <div id="psd-video-progress-detail"></div>
             </div>
             <button id="psd-video-progress-cancel" type="button">Cancel</button>
@@ -478,7 +478,7 @@
         if (stage === 'download') {
             title.textContent = state.qualityLabel
                 ? `Downloading ${state.qualityLabel}`
-                : 'Exporting stream';
+                : 'Preparing stream';
             info.textContent = formatSeparateProgress();
             cancel.style.display = 'inline-flex';
             cancel.disabled = false;
@@ -567,7 +567,7 @@
                 state.qualityLabel = qualityLabel;
                 const title = root.querySelector('#psd-video-progress-title');
                 if (title && state.stage === 'download') {
-                    title.textContent = `Exporting ${qualityLabel}`;
+                    title.textContent = `Preparing ${qualityLabel}`;
                 }
             }
             return;
